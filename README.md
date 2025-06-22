@@ -1,118 +1,101 @@
-# zig-config
+## zig-config
+A simple `.env` and `.ini` config loader for Zig.
+Version: 0.1.1
 
-A lightweight config file parser for `.env` and `.ini` formats written in Zig.
-
-## Supports:
-- Flat `.env` and multi-section `.ini` formats
-- Access to config values as `string`, `int`, `float`, `bool`
-- Section-aware lookup for `.ini` files
-- Debug printing and serialization to `.ini`
-- Works with `std.StringHashMap`
+## Features
+- ✅ Load and parse `.env` and `.ini` config strings or files
+- ✅ Get values as string, int, float, or bool
+- ✅ Merge configs (override values)
+- ✅ Extract sections as sub-configs
+- ✅ Save config as `.env` or `.ini`
+- ✅ Debug print and list all keys
+- ✅ Zero dependencies
 
 ## Usage
-
 ```zig
+const Config = @import("zig-config").Config;
 const std = @import("std");
-const config = @import("zig_ini_reader_lib");
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    var cfg = try config.Config.loadEnvFile(".env", allocator);
+    var cfg = try Config.parseEnv(
+        \\API_KEY=secret
+        \\PORT=3000
+        , allocator);
     defer cfg.deinit();
 
-    if (cfg.get("API_KEY")) |v| {
-        std.debug.print("API_KEY = {s}\n", .{v});
-    }
+    const port = cfg.getInt("PORT") orelse 8080;
+    std.debug.print("Port: {}
+", .{port});
 }
 ```
 
-## 📁 Example .env
-```env
-API_KEY=abc123
-DEBUG=true
-PORT=8080
-THRESHOLD=0.95
-```
+## Examples
+Load from .env buffer
 
-## 🧪 Example .ini
-```ini
-[database]
-host = localhost
-port = 5432
-user = admin
-
-[auth]
-enabled = true
-```
-
-## 🧰 Usage
-### Load .env file
 ```zig
-var cfg = try config.Config.loadEnvFile(".env", allocator);
-defer cfg.deinit();
+var cfg = try Config.parseEnv("FOO=bar\nDEBUG=true\n", allocator);
 ```
 
-### Load .ini file
+Load from .ini buffer
 ```zig
-var cfg = try config.Config.loadIniFile("config.ini", allocator);
-defer cfg.deinit();
+var cfg = try Config.parseIni("[server]\nport=8080\n", allocator);
 ```
 
-## 🔍 Lookup Examples
-### Get string
+Get string
 ```zig
-if (cfg.get("API_KEY")) |v| {
-    std.debug.print("API_KEY = {s}\n", .{v});
-}
+if (cfg.get("FOO")) |val| std.debug.print("{s}\n", .{val});
 ```
 
-### Get int
+Get int
 ```zig
 if (cfg.getInt("PORT")) |port| {
-    std.debug.print("Port as int: {d}\n", .{port});
+    std.debug.print("Port: {d}\n", .{port});
 }
 ```
 
-### Get bool
+Get float
 ```zig
-if (cfg.getBool("DEBUG")) |debug| {
-    std.debug.print("Debug enabled: {}\n", .{debug});
+if (cfg.getFloat("THRESHOLD")) |t| {
+    std.debug.print("Threshold: {e}\n", .{t});
 }
 ```
 
-### Get float
+Get bool
 ```zig
-if (cfg.getFloat("THRESHOLD")) |th| {
-    std.debug.print("Threshold: {f}\n", .{th});
+if (cfg.getBool("DEBUG")) |flag| {
+    std.debug.print("Debug mode: {s}\n", .{flag});
 }
 ```
 
-## 🗂 Accessing .ini Sections
+List all keys
 ```zig
-var db = try cfg.getSection("database", allocator);
-defer db.deinit();
-
-if (db.get("host")) |host| std.debug.print("Host: {s}\n", .{host});
-if (db.getInt("port")) |port| std.debug.print("Port: {}\n", .{port});
-```
-
-## 🖨 Debug Print All
-```zig
-cfg.debugPrint();
-```
-
-## 📝 Save to .ini / .env
-```zig
-try cfg.writeIniFile("out.ini", allocator);
-try cfg.writeEnvFile("out.env", allocator);
-```
-
-## 🔑 List All Keys
-```zig
-var keys = try cfg.keys(allocator);
+const keys = try cfg.keys(allocator);
 defer allocator.free(keys);
+for (keys) |k| std.debug.print("Key: {s}\n", .{k});
+```
 
-for (keys) |k| {
-    std.debug.print("Key: {s}\n", .{k});
+Get section
+```zig
+var section = try cfg.getSection("server", allocator);
+defer section.deinit();
+
+if (section.getInt("port")) |p| {
+    std.debug.print("Server port: {d}\n", .{p});
 }
+```
+
+Save as .env file
+```zig
+try cfg.writeEnvFile("output.env");
+```
+
+Save as .ini file
+```zig
+try cfg.writeIniFile("output.ini", allocator);
+```
+
+Merge configs
+```zig
+try cfg1.merge(&cfg2); // values in cfg2 override cfg1
 ```

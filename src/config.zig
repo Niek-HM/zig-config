@@ -7,9 +7,14 @@ const std = @import("std");
 /// - Access values as strings, integers, floats, or booleans.
 /// - Automatically trim whitespace and strip quotes.
 /// - Ignore blank lines and comments (`#`, `;`).
+///
+/// Version: 0.1.1
 pub const Config = struct {
+    pub const Version = "0.1.1";
+
     /// A string-to-string hash map storing the configuration entries.
     map: std.StringHashMap([]const u8),
+    pub const Format = enum { env, ini };
 
     /// Creates a new empty config with the given allocator.
     pub fn init(allocator: std.mem.Allocator) Config {
@@ -20,12 +25,22 @@ pub const Config = struct {
 
     /// Frees all memory used by the config map.
     pub fn deinit(self: *Config) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.map.allocator.free(entry.key_ptr.*);
+            self.map.allocator.free(entry.value_ptr.*);
+        }
         self.map.deinit();
     }
 
     /// Returns the raw string value for a key, or `null` if not found.
     pub fn get(self: *Config, key: []const u8) ?[]const u8 {
         return self.map.get(key);
+    }
+
+    /// Checks if a key exists in the config.
+    pub fn has(self: *Config, key: []const u8) bool {
+        return self.map.contains(key);
     }
 
     /// Loads a `.env`-style file from the given path and parses it into a config map.
@@ -296,5 +311,34 @@ pub const Config = struct {
                 try writer.print("{s} = {s}\n", .{ pair.key, pair.value });
             }
         }
+    }
+
+    /// Merges another config into this one, overriding existing keys if needed.
+    pub fn merge(self: *Config, other: *Config) !void {
+        var it = other.map.iterator();
+
+        while (it.next()) |entry| {
+            const key = try self.map.allocator.dupe(u8, entry.key_ptr.*);
+            const val = try self.map.allocator.dupe(u8, entry.value_ptr.*);
+
+            const gop = try self.map.getOrPut(key);
+            if (gop.found_existing) {
+                self.map.allocator.free(gop.key_ptr.*);
+                self.map.allocator.free(gop.value_ptr.*);
+            } else {
+                gop.key_ptr.* = key;
+            }
+
+            gop.value_ptr.* = val;
+        }
+    }
+
+    /// Loads a config from an in-memory buffer.
+    /// Accepts format `.env` or `.ini`.
+    pub fn loadFromBuffer(text: []const u8, format: Format, allocator: std.mem.Allocator) !Config {
+        return switch (format) {
+            .env => Config.parseEnv(text, allocator),
+            .ini => Config.parseIni(text, allocator),
+        };
     }
 };
