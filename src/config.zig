@@ -240,11 +240,14 @@ pub const Config = struct {
         defer file.close();
         var writer = file.writer();
 
-        // Group keys by section
-        var by_section = std.StringHashMap(std.ArrayList(struct {
+        // Use a named struct to represent each key-value pair
+        const IniEntry = struct {
             key: []const u8,
             value: []const u8,
-        })).init(allocator);
+        };
+
+        // Group keys by section
+        var by_section = std.StringHashMap(std.ArrayList(IniEntry)).init(allocator);
         defer {
             var it = by_section.iterator();
             while (it.next()) |entry| {
@@ -258,6 +261,7 @@ pub const Config = struct {
             const full_key = entry.key_ptr.*;
             const val = entry.value_ptr.*;
             const dot = std.mem.indexOfScalar(u8, full_key, '.') orelse {
+                // Keys without section go at the top
                 try writer.print("{s} = {s}\n", .{ full_key, val });
                 continue;
             };
@@ -265,22 +269,29 @@ pub const Config = struct {
             const section = full_key[0..dot];
             const key = full_key[dot + 1 ..];
 
-            const entry_val = struct { key: []const u8, value: []const u8 }{
+            const entry_val = IniEntry{
                 .key = key,
                 .value = val,
             };
 
             const list = try by_section.getOrPut(section);
             if (!list.found_existing) {
-                list.value_ptr.* = std.ArrayList(@TypeOf(entry_val)).init(allocator);
+                list.value_ptr.* = std.ArrayList(IniEntry).init(allocator);
             }
             try list.value_ptr.*.append(entry_val);
         }
 
-        // Write sections
+        // Write grouped sections
         var sec_it = by_section.iterator();
+        var first: bool = true;
         while (sec_it.next()) |entry| {
-            try writer.print("\n[{s}]\n", .{entry.key_ptr.*});
+            if (!first) {
+                try writer.writeAll("\n");
+            } else {
+                first = false;
+            }
+
+            try writer.print("[{s}]\n", .{entry.key_ptr.*});
             for (entry.value_ptr.*.items) |pair| {
                 try writer.print("{s} = {s}\n", .{ pair.key, pair.value });
             }

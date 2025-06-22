@@ -45,6 +45,8 @@ pub fn main() !void {
     // Print all keys
     cfg2.debugPrint();
 
+    try cfg2.writeIniFile("output.ini", allocator);
+
     // Extract 'database' section
     var db_section = try cfg2.getSection("database", allocator);
     defer db_section.deinit();
