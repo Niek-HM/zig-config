@@ -75,6 +75,8 @@
     // Paths are relative to the build root. Use the empty string (`""`) to refer to
     // the build root itself.
     // A directory listed here means that all files within, recursively, are included.
+    .description = "A lightweight .env and .ini file parser for Zig.",
+    .license = "MIT",
     .paths = .{
         "build.zig",
         "build.zig.zon",
