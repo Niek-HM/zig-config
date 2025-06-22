@@ -1,4 +1,4 @@
-# zig-ini-env-reader
+# zig-config
 
 A lightweight config file parser for `.env` and `.ini` formats written in Zig.
 
