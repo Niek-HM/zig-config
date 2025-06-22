@@ -83,12 +83,13 @@ if (cfg.getBool("DEBUG")) |debug| {
 ### Get float
 ```zig
 if (cfg.getFloat("THRESHOLD")) |th| {
-    std.debug.print("Threshold: {e}\n", .{th});
+    std.debug.print("Threshold: {f}\n", .{th});
 }
 ```
 
 ## 🗂 Accessing .ini Sections
-```zigvar db = try cfg.getSection("database", allocator);
+```zig
+var db = try cfg.getSection("database", allocator);
 defer db.deinit();
 
 if (db.get("host")) |host| std.debug.print("Host: {s}\n", .{host});
@@ -100,9 +101,10 @@ if (db.getInt("port")) |port| std.debug.print("Port: {}\n", .{port});
 cfg.debugPrint();
 ```
 
-## 📝 Save to .ini
+## 📝 Save to .ini / .env
 ```zig
 try cfg.writeIniFile("out.ini", allocator);
+try cfg.writeEnvFile("out.env", allocator);
 ```
 
 ## 🔑 List All Keys
