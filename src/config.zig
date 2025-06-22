@@ -50,9 +50,45 @@ pub const Config = struct {
     fn parseLine(line: []const u8) ?struct { key: []const u8, value: []const u8 } {
         const eq_index = std.mem.indexOf(u8, line, "=") orelse return null;
         const key = std.mem.trim(u8, line[0..eq_index], " \t");
-        const value = std.mem.trim(u8, line[eq_index + 1 ..], " \t\"'");
+        var value = std.mem.trim(u8, line[eq_index + 1 ..], " \t");
+
+        // Remove quotes if present:
+        if (value.len >= 2 and ((value[0] == '"' and value[value.len - 1] == '"') or
+            (value[0] == '\'' and value[value.len - 1] == '\'')))
+        {
+            value = value[1 .. value.len - 1]; // Remove first and last char
+        }
+
         if (key.len == 0 or value.len == 0) return null;
 
         return .{ .key = key, .value = value };
+    }
+
+    pub fn getInt(self: *Config, key: []const u8) ?i64 {
+        const val = self.get(key) orelse return null;
+        return std.fmt.parseInt(i64, val, 10) catch return null;
+    }
+
+    pub fn getFloat(self: *Config, key: []const u8) ?f64 {
+        const val = self.get(key) orelse return null;
+        return std.fmt.parseFloat(f64, val) catch return null;
+    }
+
+    pub fn getBool(self: *Config, key: []const u8) ?bool {
+        const val = self.get(key) orelse return null;
+
+        // Lowercase match
+        if (std.ascii.eqlIgnoreCase(val, "true")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "false")) return false;
+
+        // Uppercase match
+        if (std.ascii.eqlIgnoreCase(val, "True")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "False")) return false;
+
+        // 0/1 match
+        if (std.ascii.eqlIgnoreCase(val, "1")) return true;
+        if (std.ascii.eqlIgnoreCase(val, "0")) return false;
+
+        return null;
     }
 };

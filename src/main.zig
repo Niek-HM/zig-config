@@ -15,4 +15,16 @@ pub fn main() !void {
             std.debug.print("{s} not found\n", .{k});
         }
     }
+
+    if (cfg.getInt("PORT")) |port| {
+        std.debug.print("PORT as int: {}\n", .{port});
+    }
+
+    if (cfg.getBool("DEBUG")) |debug_mode| {
+        std.debug.print("Debug mode: {}\n", .{debug_mode});
+    }
+
+    if (cfg.getFloat("THRESHOLD")) |th| {
+        std.debug.print("Threshold: {}\n", .{th});
+    }
 }
