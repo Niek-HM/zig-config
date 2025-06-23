@@ -1,6 +1,6 @@
 /.zig-cache
 /zig-out
 
-*./main.zig
+*/main.zig
 *.ini
 *.env
