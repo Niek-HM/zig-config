@@ -2,7 +2,7 @@
 
 A lightweight configuration library for Zig. Supports parsing `.env` and `.ini` files with typed access, variable substitution, section handling, merging, and serialization.
 
-## **Features**
+# Features
 - ✅ Parse `.env` files with support for:
   - Comments, quoted values, empty lines
   - Variable substitution: `${VAR}`, `${VAR:-fallback}`, `${VAR:+val}`, etc.
@@ -14,27 +14,62 @@ A lightweight configuration library for Zig. Supports parsing `.env` and `.ini` 
 - ✅ Serialize back to `.env` or `.ini` format
 - ✅ Full error handling (`InvalidPlaceholder`, `UnknownVariable`, etc.)
 
-## **Usage**
-```zig
-const Config = @import("config").Config;
-
-const cfg = try Config.parseEnv(
-    \PORT=3000
-    \DEBUG=true
-    \URL=http://${HOST:-localhost}
-, allocator);
-defer cfg.deinit();
-
-try std.debug.print("Port = {}", .{try cfg.getInt("PORT")});
-```
-
-## **INI Sections**
+# Usage:
+## Loading a `.ini` file
 ```ini
+; settings.ini
 [database]
 host=localhost
+user=root
 port=5432
 ```
+
 ```zig
+const cfg = try Config.loadIniFile("settings.ini", allocator);
+defer cfg.deinit();
+
+const host = cfg.get("database.host") orelse "localhost";
+
 const db = try cfg.getSection("database", allocator);
-try std.debug.print("Host = {s}\n", .{db.get("host").?});
+defer db.deinit();
+
+const user = db.get("user") orelse "root";
+```
+
+## Variable substitution
+```env
+HOST=localhost
+PORT=8080
+URL=http://${HOST}:${PORT}
+FALLBACK=${NOT_SET:-default}
+```
+
+```zig
+const url = try cfg.get("URL"); // http://localhost:8080
+const fallback = try cfg.get("FALLBACK"); // "default"
+```
+
+### Supported operators:
+- `${VAR}` — error if unset
+- `${VAR:-fallback}` — fallback if unset or empty
+- `${VAR-fallback}` — fallback if unset
+- `${VAR:+value}` — use `value` if set and not empty
+- `${VAR+value}` — use `value` if set (even if empty)
+- Escaped: `\$` → `$`
+
+## Writing config to disk
+```zig
+try cfg.writeEnvFile("output.env");
+try cfg.writeIniFile("output.ini", allocator);
+```
+
+## Merge configs
+```zig
+try cfg1.merge(&cfg2, .overwrite);
+```
+
+## List keys
+```zig
+const keys = try cfg.keys(allocator);
+defer allocator.free(keys);
 ```
