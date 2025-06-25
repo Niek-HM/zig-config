@@ -9,9 +9,9 @@ const utils = @import("utils.zig");
 /// - Automatically trim whitespace and strip quotes.
 /// - Ignore blank lines and comments (`#`, `;`).
 ///
-/// Version: 0.1.2
+/// Version: 0.1.3
 pub const Config = struct {
-    pub const Version = "0.1.2";
+    pub const Version = "0.1.3";
 
     /// A string-to-string hash map storing the configuration entries.
     map: std.StringHashMap([]const u8),
