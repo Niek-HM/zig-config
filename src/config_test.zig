@@ -57,10 +57,10 @@ test "merge behavior overwrite and skip_existing" {
     try cfg2.map.put(try allocator.dupe(u8, "PORT"), try allocator.dupe(u8, "9000"));
     try cfg2.map.put(try allocator.dupe(u8, "NEW"), try allocator.dupe(u8, "val"));
 
-    try cfg1.merge(&cfg2, .overwrite);
+    try cfg1.merge(&cfg2, allocator, .overwrite);
     try testing.expectEqualStrings("9000", cfg1.get("PORT").?);
 
-    try cfg1.merge(&cfg2, .skip_existing);
+    try cfg1.merge(&cfg2, allocator, .skip_existing);
     try testing.expectEqualStrings("val", cfg1.get("NEW").?);
 }
 
@@ -75,7 +75,7 @@ test "merge behavior error_on_conflict" {
     try a.map.put(try allocator.dupe(u8, "X"), try allocator.dupe(u8, "1"));
     try b.map.put(try allocator.dupe(u8, "X"), try allocator.dupe(u8, "2"));
 
-    try testing.expectError(Config.ConfigError.KeyConflict, a.merge(&b, .error_on_conflict));
+    try testing.expectError(Config.ConfigError.KeyConflict, a.merge(&b, allocator, .error_on_conflict));
 }
 
 test "invalid int, float, and bool" {
@@ -326,4 +326,59 @@ test "loadFromBuffer parses both formats" {
     var cfg2 = try Config.loadFromBuffer(ini, .ini, allocator);
     defer cfg2.deinit();
     try testing.expectEqualStrings("val", cfg2.get("s.y").?);
+}
+
+test "system env merge and substitution behavior" {
+    const allocator = testing.allocator;
+
+    // Load current system env
+    var env_config = try Config.fromEnvMap(allocator);
+    defer env_config.deinit();
+
+    // Check if at least one known variable exists (platform-specific fallback)
+    const check_var = "Path"; // Use common variable
+    if (!env_config.has(check_var)) {
+        // Skip test if no known variable found
+        return error.SkipZigTest;
+    }
+
+    // Parse a config with substitution from env
+    const text =
+        \\MY_PATH=${Path}
+        \\DEFAULTED=${MISSING_VAR:-fallback}
+        \\COND1=${Path:+present}
+        \\COND2=${MISSING_VAR:+ignored}
+        \\COND3=${Path+used}
+    ;
+
+    var cfg = try Config.parseEnv(text, allocator);
+    defer cfg.deinit();
+
+    try testing.expect(cfg.has("MY_PATH"));
+    try testing.expectEqualStrings("fallback", cfg.get("DEFAULTED").?);
+    try testing.expectEqualStrings("present", cfg.get("COND1").?);
+    try testing.expectEqualStrings("", cfg.get("COND2").?);
+    try testing.expectEqualStrings("used", cfg.get("COND3").?);
+
+    // Merge env into parsed config, check overwrite behavior
+    var merged = try Config.parseEnv("Path=custom_path\nFOO=bar", allocator);
+    defer merged.deinit();
+
+    // Case: skip_existing (should keep original PATH)
+    try merged.merge(&env_config, allocator, .skip_existing);
+    try testing.expectEqualStrings("custom_path", merged.get("Path").?);
+
+    // Case: overwrite (should take system PATH)
+    var merged_overwrite = try Config.parseEnv("Path=custom_path\nFOO=bar", allocator);
+    defer merged_overwrite.deinit();
+
+    try merged_overwrite.merge(&env_config, allocator, .overwrite);
+    try testing.expect(!std.mem.eql(u8, merged_overwrite.get("Path").?, "custom_path"));
+
+    // Case: error_on_conflict (should fail)
+    var merged_conflict = try Config.parseEnv("Path=custom_path", allocator);
+    defer merged_conflict.deinit();
+
+    const conflict_result = merged_conflict.merge(&env_config, allocator, .error_on_conflict);
+    try testing.expectError(Config.ConfigError.KeyConflict, conflict_result);
 }

@@ -2,12 +2,17 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const ConfigError = Config.ConfigError;
 
+const ResolvedValue = struct {
+    value: []const u8,
+    owned: bool,
+};
+
 pub fn parseVariableExpression(expr: []const u8) !struct {
     var_name: []const u8,
     fallback: ?[]const u8,
     operator: enum { none, colon_dash, dash, colon_plus, plus },
 } {
-    // Determine the opirator
+    // Determine the operator
     if (std.mem.indexOf(u8, expr, ":-")) |idx| {
         return .{
             .var_name = expr[0..idx],
@@ -101,14 +106,34 @@ pub fn resolveVariables(
             defer _ = visited.remove(parsed.var_name);
 
             // Lookup value from resolved or raw set
-            const val_opt = if (source_raw_values) |raw| raw.get(parsed.var_name) else cfg.get(parsed.var_name);
+            const val_opt: ?ResolvedValue = blk: {
+                if (source_raw_values) |raw| {
+                    if (raw.get(parsed.var_name)) |val| {
+                        break :blk ResolvedValue{ .value = val, .owned = false };
+                    }
+                }
+                if (cfg.get(parsed.var_name)) |val| {
+                    break :blk ResolvedValue{ .value = val, .owned = false };
+                }
+
+                const env_val = std.process.getEnvVarOwned(allocator, parsed.var_name) catch null;
+                if (env_val) |e| {
+                    const copy = try allocator.dupe(u8, e);
+                    allocator.free(e);
+                    break :blk ResolvedValue{ .value = copy, .owned = true };
+                }
+
+                break :blk null;
+            };
 
             const resolved = switch (parsed.operator) {
                 .none => blk: {
-                    if (val_opt) |val| {
+                    if (val_opt) |val_data| {
+                        const val = val_data.value;
                         const rec = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
                         try result.appendSlice(rec);
                         allocator.free(rec);
+                        if (val_data.owned) allocator.free(val);
                         break :blk "";
                     }
                     if (parsed.fallback) |fb| {
@@ -120,13 +145,16 @@ pub fn resolveVariables(
                     return ConfigError.UnknownVariable;
                 },
                 .colon_dash => blk: {
-                    if (val_opt) |val| {
+                    if (val_opt) |val_data| {
+                        const val = val_data.value;
                         if (val.len > 0) {
                             const rec = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
                             try result.appendSlice(rec);
                             allocator.free(rec);
+                            if (val_data.owned) allocator.free(val);
                             break :blk "";
                         }
+                        if (val_data.owned) allocator.free(val);
                     }
                     if (parsed.fallback) |fb| {
                         const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
@@ -137,10 +165,12 @@ pub fn resolveVariables(
                     return ConfigError.UnknownVariable;
                 },
                 .dash => blk: {
-                    if (val_opt) |val| {
+                    if (val_opt) |val_data| {
+                        const val = val_data.value;
                         const rec = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
                         try result.appendSlice(rec);
                         allocator.free(rec);
+                        if (val_data.owned) allocator.free(val);
                         break :blk "";
                     }
                     if (parsed.fallback) |fb| {
@@ -152,27 +182,32 @@ pub fn resolveVariables(
                     return ConfigError.UnknownVariable;
                 },
                 .colon_plus => blk: {
-                    if (val_opt) |val| {
+                    if (val_opt) |val_data| {
+                        const val = val_data.value;
                         if (val.len > 0) {
                             if (parsed.fallback) |fb| {
                                 const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                                 try result.appendSlice(fb_val);
                                 allocator.free(fb_val);
+                                if (val_data.owned) allocator.free(val);
                                 break :blk "";
                             }
                         }
+                        if (val_data.owned) allocator.free(val);
                     }
                     break :blk "";
                 },
                 .plus => blk: {
-                    const exists = if (source_raw_values) |raw| raw.contains(parsed.var_name) else cfg.has(parsed.var_name);
-                    if (exists) {
+                    if (val_opt) |val_data| {
+                        const val = val_data.value;
                         if (parsed.fallback) |fb| {
                             const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                             try result.appendSlice(fb_val);
                             allocator.free(fb_val);
+                            if (val_data.owned) allocator.free(val);
                             break :blk "";
                         }
+                        if (val_data.owned) allocator.free(val);
                     }
                     break :blk "";
                 },
@@ -186,4 +221,40 @@ pub fn resolveVariables(
         }
     }
     return result.toOwnedSlice();
+}
+
+/// Internal helper for merging a single key/value with conflict handling.
+pub fn insertEntry(
+    cfg: *Config,
+    key: []const u8,
+    value: []const u8,
+    behavior: Config.MergeBehavior,
+    allocator: std.mem.Allocator,
+) !void {
+    const k = try allocator.dupe(u8, key);
+    const v = try allocator.dupe(u8, value);
+
+    const gop = try cfg.map.getOrPut(k);
+    if (gop.found_existing) {
+        switch (behavior) {
+            .overwrite => {
+                cfg.map.allocator.free(gop.key_ptr.*);
+                cfg.map.allocator.free(gop.value_ptr.*);
+                gop.key_ptr.* = k;
+                gop.value_ptr.* = v;
+            },
+            .skip_existing => {
+                allocator.free(k);
+                allocator.free(v);
+            },
+            .error_on_conflict => {
+                allocator.free(k);
+                allocator.free(v);
+                return ConfigError.KeyConflict;
+            },
+        }
+    } else {
+        gop.key_ptr.* = k;
+        gop.value_ptr.* = v;
+    }
 }

@@ -96,6 +96,23 @@ pub const Config = struct {
         return self.map.contains(key);
     }
 
+    /// Loads from the system environment into the Config;
+    /// All variables from the process evironment are copied in.
+    pub fn fromEnvMap(allocator: std.mem.Allocator) !Config {
+        var config = Config.init(allocator);
+        var env_map = try std.process.getEnvMap(allocator);
+        defer env_map.deinit();
+
+        var it = env_map.iterator();
+        while (it.next()) |entry| {
+            const k = try allocator.dupe(u8, entry.key_ptr.*);
+            const v = try allocator.dupe(u8, entry.value_ptr.*);
+            try config.map.put(k, v);
+        }
+
+        return config;
+    }
+
     /// Loads a `.env`-style file from the given path and parses it into a config map.
     ///
     /// The format supports:
@@ -153,7 +170,7 @@ pub const Config = struct {
 
         var it = raw_values.iterator();
         while (it.next()) |entry| {
-            const resolved_val = try utils.resolveVariables(
+            const val = try utils.resolveVariables(
                 entry.value_ptr.*,
                 &config,
                 allocator,
@@ -163,10 +180,10 @@ pub const Config = struct {
             );
 
             const key_copy = try allocator.dupe(u8, entry.key_ptr.*);
-            const val_copy = try allocator.dupe(u8, resolved_val);
+            const val_copy = try allocator.dupe(u8, val);
 
             try config.map.put(key_copy, val_copy);
-            allocator.free(resolved_val);
+            allocator.free(val);
         }
 
         return config;
@@ -468,6 +485,19 @@ pub const Config = struct {
         }
     }
 
+    /// Converts the config into an `EnvMap`, suitable for use with subprocesses.
+    pub fn toEnvMap(self: *Config, allocator: std.mem.Allocator) !std.process.EnvMap {
+        var env_map = std.process.EnvMap.init(allocator);
+        errdefer env_map.deinit();
+
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            try env_map.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        return env_map;
+    }
+
     /// Merges entries from another config into this one.
     ///
     /// Behavior is controlled by the `MergeBehavior` enum:
@@ -479,36 +509,20 @@ pub const Config = struct {
     ///
     /// Returns:
     /// - `KeyConflict` if a conflict occurs and behavior is `.error_on_conflict`
-    pub fn merge(self: *Config, other: *Config, behavior: MergeBehavior) !void {
-        var it = other.map.iterator();
+    pub fn merge(self: *Config, other: ?*Config, allocator: std.mem.Allocator, behavior: MergeBehavior) !void {
+        if (other) |o| {
+            var it = o.map.iterator();
+            while (it.next()) |entry| {
+                try utils.insertEntry(self, entry.key_ptr.*, entry.value_ptr.*, behavior, allocator);
+            }
+        } else {
+            // Merge from system environment
+            var env_map = try std.process.getEnvMap(allocator);
+            defer env_map.deinit();
 
-        while (it.next()) |entry| {
-            const key = try self.map.allocator.dupe(u8, entry.key_ptr.*);
-            const val = try self.map.allocator.dupe(u8, entry.value_ptr.*);
-
-            const gop = try self.map.getOrPut(key);
-            if (gop.found_existing) {
-                switch (behavior) {
-                    .overwrite => {
-                        self.map.allocator.free(gop.key_ptr.*);
-                        self.map.allocator.free(gop.value_ptr.*);
-                        gop.key_ptr.* = key;
-                        gop.value_ptr.* = val;
-                    },
-                    .skip_existing => {
-                        self.map.allocator.free(key);
-                        self.map.allocator.free(val);
-                        continue;
-                    },
-                    .error_on_conflict => {
-                        self.map.allocator.free(key);
-                        self.map.allocator.free(val);
-                        return ConfigError.KeyConflict;
-                    },
-                }
-            } else {
-                gop.key_ptr.* = key;
-                gop.value_ptr.* = val;
+            var it = env_map.iterator();
+            while (it.next()) |entry| {
+                try utils.insertEntry(self, entry.key_ptr.*, entry.value_ptr.*, behavior, allocator);
             }
         }
     }
