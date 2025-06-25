@@ -104,19 +104,6 @@ test "variable substitution: plain and :- fallback" {
     try testing.expectEqualStrings("http://localhost", cfg.get("URL").?);
 }
 
-test "substitution with fallback dash - and empty value" {
-    const allocator = testing.allocator;
-    const text =
-        \\HOST=
-        \\URL=http://${HOST-fallback}
-    ;
-
-    var cfg = try Config.parseEnv(text, allocator);
-    defer cfg.deinit();
-
-    try testing.expectEqualStrings("http://fallback", cfg.get("URL").?);
-}
-
 test "substitution with :+ and +" {
     const allocator = testing.allocator;
     const text =
@@ -139,13 +126,15 @@ test "substitution with :+ and +" {
 test "escaped dollar sign \\$" {
     const allocator = testing.allocator;
     const text =
-        \\KEY=\\$100
+        \\KEY=\$100
+        \\KEY2=\${100}
     ;
 
     var cfg = try Config.parseEnv(text, allocator);
     defer cfg.deinit();
 
     try testing.expectEqualStrings("$100", cfg.get("KEY").?);
+    try testing.expectEqualStrings("${100}", cfg.get("KEY2").?);
 }
 
 test "error on unknown variable without fallback" {
@@ -254,4 +243,87 @@ test "getSection returns Missing if no matching keys" {
     defer cfg.deinit();
 
     try testing.expectError(Config.ConfigError.Missing, cfg.getSection("notfound", allocator));
+}
+
+test "deinit does not double-free or leak with mixed keys" {
+    const allocator = testing.allocator;
+    var cfg = Config.init(allocator);
+    defer cfg.deinit();
+
+    try cfg.map.put(try allocator.dupe(u8, "key1"), try allocator.dupe(u8, "val1"));
+    try cfg.map.put(try allocator.dupe(u8, "key2"), try allocator.dupe(u8, "val2"));
+    // implicit test: deferred deinit
+}
+
+test "keys() returns all config keys" {
+    const allocator = testing.allocator;
+    const text =
+        \\A=1
+        \\B=2
+    ;
+
+    var cfg = try Config.parseEnv(text, allocator);
+    defer cfg.deinit();
+
+    const keys = try cfg.keys(allocator);
+    defer allocator.free(keys);
+
+    var found_a = false;
+    var found_b = false;
+    for (keys) |k| {
+        if (std.mem.eql(u8, k, "A")) found_a = true;
+        if (std.mem.eql(u8, k, "B")) found_b = true;
+    }
+    try testing.expect(found_a and found_b);
+}
+
+test "circular reference inside fallback still triggers error" {
+    const allocator = testing.allocator;
+    const text =
+        \\A=${B:-${C}}
+        \\B=${C}
+        \\C=${A}
+    ;
+
+    try testing.expectError(Config.ConfigError.CircularReference, Config.parseEnv(text, allocator));
+}
+
+test "ini section with only brackets and whitespace is invalid" {
+    const allocator = testing.allocator;
+    const text = "[ ]";
+    try testing.expectError(Config.ConfigError.ParseUnterminatedSection, Config.parseIni(text, allocator));
+}
+
+test "ini last key wins for repeated keys" {
+    const allocator = testing.allocator;
+    const text =
+        \\[app]
+        \\key=val1
+        \\key=val2
+    ;
+
+    var cfg = try Config.parseIni(text, allocator);
+    defer cfg.deinit();
+
+    try testing.expectEqualStrings("val2", cfg.get("app.key").?);
+}
+
+test "ini empty section name is invalid" {
+    const allocator = testing.allocator;
+    const text = "[ ]\nkey=value";
+    try testing.expectError(Config.ConfigError.ParseUnterminatedSection, Config.parseIni(text, allocator));
+}
+
+test "loadFromBuffer parses both formats" {
+    const allocator = testing.allocator;
+    const env = "X=42";
+    const ini = "[s]\ny=val";
+
+    var cfg1 = try Config.loadFromBuffer(env, .env, allocator);
+    defer cfg1.deinit();
+    try testing.expectEqualStrings("42", cfg1.get("X").?);
+
+    var cfg2 = try Config.loadFromBuffer(ini, .ini, allocator);
+    defer cfg2.deinit();
+    try testing.expectEqualStrings("val", cfg2.get("s.y").?);
 }

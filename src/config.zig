@@ -38,6 +38,7 @@ pub const Config = struct {
         ParseInvalidLine,
         ParseUnterminatedSection,
         ParseInvalidFormat,
+        CircularReference,
     };
 
     /// Creates a new empty config with the given allocator.
@@ -60,6 +61,34 @@ pub const Config = struct {
     /// Returns the raw string value for a key, or `null` if not found.
     pub fn get(self: *Config, key: []const u8) ?[]const u8 {
         return self.map.get(key);
+    }
+
+    /// Retrieves and parses the value for a key as the given type `T`.
+    ///
+    /// Supported types:
+    /// - `i64`, `f64`, `bool` → parsed with appropriate checks
+    /// - `[]const u8` → returns an allocator-owned copy
+    ///
+    /// Example usage:
+    /// ```zig
+    /// const port = try cfg.getAs(i64, "PORT", allocator);
+    /// const debug = try cfg.getAs(bool, "DEBUG", allocator);
+    /// ```
+    ///
+    /// Returns:
+    /// - Parsed value as `T`
+    /// - Error if the key is missing or the value is invalid for the given type
+    pub fn getAs(self: *Config, comptime T: type, key: []const u8, allocator: std.mem.Allocator) !T {
+        return switch (T) {
+            i64 => @as(T, try self.getInt(key)),
+            f64 => @as(T, try self.getFloat(key)),
+            bool => @as(T, try self.getBool(key)),
+            []const u8 => blk: {
+                const val = self.get(key) orelse return ConfigError.Missing;
+                break :blk try allocator.dupe(u8, val);
+            },
+            else => @compileError("Unsupported type for getAs(): " ++ @typeName(T)),
+        };
     }
 
     /// Checks if a key exists in the config.
@@ -87,11 +116,28 @@ pub const Config = struct {
         return try parseEnv(content, allocator);
     }
 
-    /// Parses raw `.env` text into a `Config`, splitting by line and parsing each `KEY=VALUE`.
+    /// Parses raw `.env` text into a `Config`, supporting variable substitution and comments.
     ///
-    /// Does not validate or enforce any required keys.
+    /// Supports:
+    /// - Lines in `KEY=VALUE` format
+    /// - Quoted values (`"abc"` or `'abc'`)
+    /// - Ignoring lines starting with `#` or `;`
+    /// - Variable substitution using `${VAR}`, `${VAR:-fallback}`, etc.
+    /// - Detection of circular references during substitution
+    ///
+    /// Returns a new `Config` with fully resolved values.
     pub fn parseEnv(text: []const u8, allocator: std.mem.Allocator) !Config {
         var config = Config.init(allocator);
+
+        var raw_values = std.StringHashMap([]const u8).init(allocator);
+        defer {
+            var it = raw_values.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.*);
+            }
+            raw_values.deinit();
+        }
 
         var lines = std.mem.splitSequence(u8, text, "\n");
         while (lines.next()) |line| {
@@ -100,70 +146,30 @@ pub const Config = struct {
 
             const kv = try parseLine(trimmed);
             const key_copy = try allocator.dupe(u8, kv.key);
+            const val_copy = try allocator.dupe(u8, kv.value);
 
-            const resolved_val: []const u8 = resolveVariables(kv.value, &config, allocator) catch |e| {
-                allocator.free(key_copy);
-                config.deinit();
-                return e;
-            };
+            try raw_values.put(key_copy, val_copy);
+        }
 
-            const val_copy: []const u8 = allocator.dupe(u8, resolved_val) catch |e| {
-                allocator.free(key_copy);
-                allocator.free(resolved_val);
-                config.deinit();
-                return e;
-            };
+        var it = raw_values.iterator();
+        while (it.next()) |entry| {
+            const resolved_val = try utils.resolveVariables(
+                entry.value_ptr.*,
+                &config,
+                allocator,
+                null,
+                entry.key_ptr.*,
+                &raw_values,
+            );
+
+            const key_copy = try allocator.dupe(u8, entry.key_ptr.*);
+            const val_copy = try allocator.dupe(u8, resolved_val);
 
             try config.map.put(key_copy, val_copy);
             allocator.free(resolved_val);
         }
 
         return config;
-    }
-
-    // Helper func for parseEnv (Resolve variables)
-    fn resolveVariables(value: []const u8, cfg: *Config, allocator: std.mem.Allocator) ![]const u8 {
-        var result = std.ArrayList(u8).init(allocator);
-        defer result.deinit();
-
-        var i: usize = 0;
-        while (i < value.len) {
-            if (value[i] == '\\' and i + 1 < value.len and value[i + 1] == '$') {
-                // Handle escaped dollar: \$ -> $
-                try result.append('$');
-                i += 2;
-            } else if (value[i] == '$' and i + 1 < value.len and value[i + 1] == '{') {
-                const end = std.mem.indexOfScalarPos(u8, value, i + 2, '}') orelse return ConfigError.InvalidPlaceholder;
-                const inside = value[i + 2 .. end];
-
-                const parsed = try utils.parseVariableExpression(inside);
-
-                const val_opt = cfg.get(parsed.var_name);
-                const resolved = switch (parsed.operator) {
-                    .none => val_opt orelse return ConfigError.UnknownVariable,
-
-                    // ${VAR:-fallback} → fallback if VAR unset or empty
-                    .colon_dash => if (val_opt) |val| if (val.len > 0) val else parsed.fallback orelse return ConfigError.UnknownVariable else parsed.fallback orelse return ConfigError.UnknownVariable,
-
-                    // ${VAR-fallback} → fallback if VAR is unset (but use empty if set)
-                    .dash => val_opt orelse parsed.fallback orelse return ConfigError.UnknownVariable,
-
-                    // ${VAR:+fallback} → fallback if VAR set and not empty
-                    .colon_plus => if (val_opt) |val| if (val.len > 0) parsed.fallback orelse "" else "" else "",
-
-                    // ${VAR+fallback} → fallback if VAR is set (even if empty)
-                    .plus => if (cfg.map.contains(parsed.var_name)) parsed.fallback orelse "" else "",
-                };
-
-                //const resolved = cfg.get(var_name) orelse fallback orelse return errors.UnknownVariable;
-                try result.appendSlice(resolved);
-                i = end + 1;
-            } else {
-                try result.append(value[i]);
-                i += 1;
-            }
-        }
-        return result.toOwnedSlice();
     }
 
     /// Loads and parses a `.ini` file into a config map.
@@ -180,8 +186,17 @@ pub const Config = struct {
         return try parseIni(content, allocator);
     }
 
-    /// Parses a `.ini`-style config into a float map.
-    /// Sections are prefixed to keys as `section.key`.
+    /// Parses raw `.ini` text into a `Config`, grouping keys by section.
+    ///
+    /// Supports:
+    /// - `[section]` headers
+    /// - Lines in `key=value` format
+    /// - Quoted values (`"abc"` or `'abc'`)
+    /// - Ignoring lines starting with `#` or `;`
+    /// - Keys are stored as `section.key` internally
+    /// - Keys outside any section are stored as-is
+    ///
+    /// Returns a new `Config` with all keys fully parsed and namespaced by section.
     pub fn parseIni(text: []const u8, allocator: std.mem.Allocator) !Config {
         var config = Config.init(allocator);
         var current_section: ?[]const u8 = null;
@@ -196,7 +211,12 @@ pub const Config = struct {
             }
 
             if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-                current_section = trimmed[1 .. trimmed.len - 1];
+                const name = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
+                if (name.len == 0) {
+                    config.deinit();
+                    return ConfigError.ParseUnterminatedSection;
+                }
+                current_section = name;
                 continue;
             }
 
@@ -227,7 +247,16 @@ pub const Config = struct {
                 return error.OutOfMemory;
             };
 
-            try config.map.put(full_key, val_copy);
+            const gop = try config.map.getOrPut(full_key);
+            if (gop.found_existing) {
+                config.map.allocator.free(gop.key_ptr.*); // free old key
+                config.map.allocator.free(gop.value_ptr.*); // free old val
+                gop.key_ptr.* = full_key;
+                gop.value_ptr.* = val_copy;
+            } else {
+                gop.key_ptr.* = full_key;
+                gop.value_ptr.* = val_copy;
+            }
         }
 
         return config;
@@ -271,7 +300,7 @@ pub const Config = struct {
     /// Attempts to parse the value of `key` as a boolean.
     ///
     /// Accepts `true`, `false`, `1`, `0` in any case.
-    /// Returns `null` if the value is unrecognized or key is missing.
+    /// Returns `InvalidBool` if the value is unrecognized or key is missing.
     pub fn getBool(self: *Config, key: []const u8) !bool {
         const val = self.get(key) orelse return ConfigError.Missing;
 
@@ -309,8 +338,16 @@ pub const Config = struct {
         return key;
     }
 
-    /// Return all key-value pairs that begin with a given section prefix.
-    /// Keys returned will have the prefix **removed** (e.g., "port" instead of "database.port").
+    /// Returns a new config containing only keys from the given section.
+    ///
+    /// Extracts all keys prefixed with `section.` and returns them in a new `Config`
+    /// with the prefix removed from each key (e.g., "database.port" → "port").
+    ///
+    /// Returns:
+    /// - `Config` with section keys
+    /// - `ConfigError.Missing` if no matching section keys found
+    ///
+    /// Caller must `deinit` the returned config.
     pub fn getSection(self: *Config, section: []const u8, allocator: std.mem.Allocator) !Config {
         var result = Config.init(allocator);
         const prefix = try std.fmt.allocPrint(allocator, "{s}.", .{section});
@@ -353,8 +390,21 @@ pub const Config = struct {
         }
     }
 
-    /// Writes config to an `.ini`-style file, grouped by section headers.
-    /// Keys without sections go at the top.
+    /// Writes all config entries to an `.ini`-style file.
+    ///
+    /// - Keys in the form `section.key` are grouped under `[section]` headers
+    /// - Keys without a section are written at the top of the file
+    /// - The output is sorted by insertion order
+    ///
+    /// Example output:
+    /// ```ini
+    /// host = localhost
+    ///
+    /// [server]
+    /// port = 3000
+    /// ```
+    ///
+    /// Overwrites the file at `path`.
     pub fn writeIniFile(self: *Config, path: []const u8, allocator: std.mem.Allocator) !void {
         const file = try std.fs.cwd().createFile(path, .{ .truncate = true }) catch return ConfigError.IoError;
         defer file.close();
@@ -418,7 +468,17 @@ pub const Config = struct {
         }
     }
 
-    /// Merges another config into this one, overriding existing keys if needed.
+    /// Merges entries from another config into this one.
+    ///
+    /// Behavior is controlled by the `MergeBehavior` enum:
+    /// - `.overwrite`: overwrite existing keys
+    /// - `.skip_existing`: keep existing keys, skip duplicates
+    /// - `.error_on_conflict`: fail if any key already exists
+    ///
+    /// All merged keys and values are duplicated using the current config’s allocator.
+    ///
+    /// Returns:
+    /// - `KeyConflict` if a conflict occurs and behavior is `.error_on_conflict`
     pub fn merge(self: *Config, other: *Config, behavior: MergeBehavior) !void {
         var it = other.map.iterator();
 
@@ -440,7 +500,11 @@ pub const Config = struct {
                         self.map.allocator.free(val);
                         continue;
                     },
-                    .error_on_conflict => return ConfigError.KeyConflict,
+                    .error_on_conflict => {
+                        self.map.allocator.free(key);
+                        self.map.allocator.free(val);
+                        return ConfigError.KeyConflict;
+                    },
                 }
             } else {
                 gop.key_ptr.* = key;
