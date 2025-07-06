@@ -234,24 +234,27 @@ pub const Config = struct {
             raw_values.deinit();
         }
 
+        var dummy_buf = std.ArrayList(u8).init(allocator);
+        defer dummy_buf.deinit();
+
         var lines = std.mem.splitSequence(u8, text, "\n");
         while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, "\t\r\n");
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
             const kv = try parseLine(trimmed);
 
-            var dummy_lines = std.mem.splitSequence(u8, "", "\n");
-            var dummy_buf = std.ArrayList(u8).init(allocator);
-            defer dummy_buf.deinit();
+            // Parse strings
+            var single_line_iter = std.mem.splitSequence(u8, "", "\n");
 
-            const parsed_value = try utils.parseString(kv.value, &dummy_lines, &dummy_buf, allocator);
+            const parsed_value = try utils.parseString(kv.value, &single_line_iter, &dummy_buf, allocator);
             errdefer allocator.free(parsed_value);
 
             const key_copy = try allocator.dupe(u8, kv.key);
             try raw_values.put(key_copy, parsed_value);
         }
 
+        // Resolve substitutions like ${VAR}, using env fallback
         var it = raw_values.iterator();
         while (it.next()) |entry| {
             const resolved = try utils.resolveVariables(
@@ -266,7 +269,6 @@ pub const Config = struct {
 
             const key_copy = try allocator.dupe(u8, entry.key_ptr.*);
             const val_copy = try allocator.dupe(u8, resolved);
-
             try config.map.put(key_copy, val_copy);
             allocator.free(resolved);
         }
@@ -309,36 +311,41 @@ pub const Config = struct {
             if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
             if (trimmed.len < 3 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']')
-                return ConfigError.ParseUnterminatedSection;
+                return Config.ConfigError.ParseUnterminatedSection;
 
+            // Handle section headers
             if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
                 const name = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
-                if (name.len == 0) return ConfigError.ParseUnterminatedSection;
+                if (name.len == 0) return Config.ConfigError.ParseUnterminatedSection;
                 current_section = name;
                 continue;
             }
 
+            // Parse key=value from the line
             const kv = try parseLine(trimmed);
 
+            // Create full key as "section.key" or just "key"
             const full_key = blk: {
                 if (current_section) |sec| {
-                    const joined_len = sec.len + 1 + kv.key.len;
-                    const buf = try allocator.alloc(u8, joined_len);
-                    std.mem.copyForwards(u8, buf[0..sec.len], sec);
-                    buf[sec.len] = '.';
-                    std.mem.copyForwards(u8, buf[sec.len + 1 ..], kv.key);
-                    break :blk buf;
+                    break :blk try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, kv.key });
                 } else {
                     break :blk try allocator.dupe(u8, kv.key);
                 }
             };
+            errdefer allocator.free(full_key);
 
             var dummy_lines = std.mem.splitSequence(u8, "", "\n");
             var dummy_buf = std.ArrayList(u8).init(allocator);
             defer dummy_buf.deinit();
 
-            const parsed_value = try utils.parseString(kv.value, &dummy_lines, &dummy_buf, allocator);
-            errdefer allocator.free(full_key);
+            // Parse strings
+            const parsed = try utils.parseString(kv.value, &dummy_lines, &dummy_buf, allocator);
+
+            // Resolve any ${VAR} substitutions
+            const resolved = if (std.mem.indexOfScalar(u8, parsed, '$') != null)
+                try utils.resolveVariables(parsed, &config, allocator, null, full_key, null)
+            else
+                parsed;
 
             const gop = try config.map.getOrPut(full_key);
             if (gop.found_existing) {
@@ -346,7 +353,9 @@ pub const Config = struct {
                 allocator.free(gop.value_ptr.*);
             }
             gop.key_ptr.* = full_key;
-            gop.value_ptr.* = parsed_value;
+            gop.value_ptr.* = resolved;
+
+            if (!std.mem.eql(u8, resolved, parsed)) allocator.free(parsed);
         }
 
         return config;
