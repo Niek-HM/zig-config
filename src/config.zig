@@ -13,7 +13,7 @@ const utils = @import("utils.zig");
 pub const Config = struct {
     pub const Version = "0.1.3";
 
-    /// A string-to-string hash map storing the configuration entries.
+    /// A string-to-string hash map storing the entries.
     map: std.StringHashMap([]const u8),
     pub const Format = enum { env, ini, toml };
 
