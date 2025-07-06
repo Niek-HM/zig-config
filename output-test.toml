@@ -1,0 +1,10 @@
+host = "localhost"
+port = "8080"
+
+[db]
+user = "admin"
+pass = "p@ss\"w\\rd"
+name = "prod"
+
+[empty]
+value = ""

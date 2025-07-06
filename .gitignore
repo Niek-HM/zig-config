@@ -4,3 +4,4 @@
 */main.zig
 *.ini
 *.env
+src/*test*.zig

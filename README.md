@@ -1,110 +1,105 @@
-# zig-config V0.1.3
+# zig-config
 
-A lightweight config parser for Zig with support for `.env` and `.ini` formats, shell-style variable substitution, type-safe access, merging, and system environment fallback.
+A lightweight configuration loader for `.env`, `.ini`, and `.toml` files written in Zig.  
+It supports variable substitution, typed access, merging, and exporting to environment maps.
 
-# Features
-### ✅ Parsing
-- `.env` files (key=value)
-- `.ini` files (with `[sections]`)
-- Quoted values (`"..."`) and comments (`#`, `;`)
+## Features
 
-### ✅ Variable Substitution
-Supports shell-like substitution patterns:
-- `${VAR}` — simple substitution
-- `${VAR:-fallback}` — fallback if unset or empty
-- `${VAR-default}` — fallback if unset
-- `${VAR:+alt}` — use `alt` if set and non-empty
-- `${VAR+alt}` — use `alt` if set
-- Supports nesting: `${A:-${B:-default}}`
-- Escaping via `\$` for literal dollar signs
+✅ Parse `.env`, `.ini`, and `.toml` formats  
+✅ Access config values as `[]const u8`, `i64`, `f64`, `bool`, or arrays  
+✅ Variable substitution (`${VAR}`, `${VAR:-default}`, etc.)  
+✅ Merging with control over overwrite behavior  
+✅ Load from file, buffer, or environment  
+✅ Write back to `.env`, `.ini`, `.toml`  
+✅ Fully tested, memory-safe, leak-free  
+✅ No dependencies
 
-### ✅ Environment Integration (New in v0.1.3)
-- Load config from `std.process.environ`
-- Substitution falls back to system environment (`std.process.getEnvVarOwned`)
-- Merge system env into config with conflict behavior:
-  - `.overwrite`, `.skip_existing`, `.error_on_conflict`
-
-### ✅ Accessors
-- `get(key)` → `?[]const u8`
-- `getInt(key)` → `?i64`
-- `getBool(key)` → `?bool`
-- `getFloat(key)` → `?f64`
-- `getAs(comptime T, key)` → `!T`
-
-### ✅ Serialization
-- Write back `.env` or `.ini` files
-- Optional variable expansion (coming soon)
-
-### ✅ Merging
-- Merge configs with conflict behavior:
-  - `.overwrite`, `.skip_existing`, `.error_on_conflict`
-
-### ✅ Other
-- Detects circular references during substitution
-- Clean memory management, no leaks
-- Tested on Linux and Windows
-
-# Usage:
-## Loading a `.ini` file
-```ini
-; settings.ini
-[database]
-host=localhost
-user=root
-port=5432
-```
+## Example
 
 ```zig
-const cfg = try Config.loadIniFile("settings.ini", allocator);
-// .loadEnvFile for .env and .fromEnvMap(allocator) to load sys variables
-defer cfg.deinit();
+const std = @import("std");
+const Config = @import("zig-config").Config;
 
-const host = cfg.get("database.host") orelse "localhost";
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+    var cfg = try Config.loadEnvFile("config.env", allocator);
+    defer cfg.deinit();
 
-const db = try cfg.getSection("database", allocator);
-defer db.deinit();
+    const port = try cfg.getAs(i64, "PORT", allocator);
+    const debug = try cfg.getAs(bool, "DEBUG", allocator);
+    const host = try cfg.getAs([]const u8, "HOST", allocator);
+    defer allocator.free(host);
 
-const user = db.get("user") orelse "root";
+    std.debug.print("Running on {s}:{d} (debug = {})", .{ host, port, debug });
+}
 ```
 
-## Variable substitution
-```env
-HOST=localhost
-PORT=8080
-URL=http://${HOST}:${PORT}
-FALLBACK=${NOT_SET:-default}
-```
+## Variable Substitution
+
+Supports:
+
+- `${VAR}` → error if `VAR` missing
+- `${VAR:-default}` → fallback if missing or empty
+- `${VAR-default}` → fallback if missing
+- `${VAR:+alt}` → use `alt` if set and not empty
+- `${VAR+alt}` → use `alt` if set
+
+Nested substitutions and circular reference detection are supported.
+
+## Merging Configs
 
 ```zig
-const url = try cfg.get("URL"); // http://localhost:8080
-const fallback = try cfg.get("FALLBACK"); // "default"
+try config.merge(&other, allocator, .overwrite);
 ```
 
-### Supported operators:
-- `${VAR}` — error if unset
-- `${VAR:-fallback}` — fallback if unset or empty
-- `${VAR-fallback}` — fallback if unset
-- `${VAR:+value}` — use `value` if set and not empty
-- `${VAR+value}` — use `value` if set (even if empty)
-- Escaped: `\$` → `$`
-- Resolution order: `raw` → `config` → `system env`
+`MergeBehavior` options:
 
-## Writing config to disk
+- `.overwrite` → always use new value  
+- `.skip_existing` → keep existing  
+- `.error_on_conflict` → fail on duplicate keys
+
+You can also merge directly from the system environment:
+
 ```zig
-try cfg.writeEnvFile("output.env");
-try cfg.writeIniFile("output.ini", allocator);
+try config.merge(null, allocator, .skip_existing);
 ```
 
-## Merge configs
+## Supported Formats
+
+- `.env`: simple `KEY=value`, comments `#` or `;`
+- `.ini`: `[section]` headers + key/value
+- `.toml`: full support for strings, arrays, inline tables, booleans, numbers
+
+## Writing Files
+
 ```zig
-try cfg1.merge(&cfg2, .overwrite);
+try config.writeEnvFile("output.env");
+try config.writeIniFile("output.ini", allocator);
+try config.writeTomlFile("output.toml");
 ```
 
-## List keys and getAs
+## Typed Access
+
 ```zig
-const keys = try cfg.keys(allocator);
-defer allocator.free(keys);
-
-const get_int: i64 = try cfg.getAs(i64, "ITEM", allocator);
-Note: All strings are allocator-owned unless sys env (copied).
+const db_port = try config.getAs(i64, "database.port", allocator);
+const features = try config.getAs([]bool, "ENABLED_FLAGS", allocator);
 ```
+
+Arrays supported: `[]i64`, `[]f64`, `[]bool`, `[][]const u8`
+
+## Roadmap
+✅ Short-term goals (v0.2.x)
+- [x] Full TOML support (multiline strings, arrays, inline tables, escaping, substitution)
+- [ ] `.json` config input support
+- [ ] `.env.example` validation (check for missing/extra keys)
+- [ ] Null-delimited `EnvMap` export for subprocesses
+- [ ] Improve write serialization (preserve formatting where possible)
+- [ ] Preserve typed values across formats (e.g. `true` instead of `"true"`)
+- [ ] CLI tool: merge, diff, validate, and export config
+
+🔭 Long-term goals (v0.3+)
+- [ ] Live config reloading (file watching API)
+- [ ] SQLite-backed config store (persistent, reloadable)
+- [ ] Secrets injection from .secrets.env or Vault-compatible store
+- [ ] Typed schema validation (define required fields, expected types)
+- [ ] `YAML` support
