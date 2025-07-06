@@ -311,12 +311,12 @@ pub const Config = struct {
             if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
             if (trimmed.len < 3 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']')
-                return Config.ConfigError.ParseUnterminatedSection;
+                return ConfigError.ParseUnterminatedSection;
 
             // Handle section headers
             if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
                 const name = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
-                if (name.len == 0) return Config.ConfigError.ParseUnterminatedSection;
+                if (name.len == 0) return ConfigError.ParseUnterminatedSection;
                 current_section = name;
                 continue;
             }
@@ -429,8 +429,7 @@ pub const Config = struct {
                 try std.fmt.allocPrint(allocator, "{s}.{s}", .{ current_prefix, raw_key })
             else
                 try allocator.dupe(u8, raw_key);
-            var full_key_used = false;
-            defer if (!full_key_used) allocator.free(full_key);
+            errdefer allocator.free(full_key);
 
             // * Handle Strings
             if (raw_val.len >= 1 and (raw_val[0] == '"' or raw_val[0] == '\'' or
@@ -443,7 +442,6 @@ pub const Config = struct {
                     parsed_str;
 
                 try config.map.put(full_key, final_val);
-                full_key_used = true;
                 if (!std.mem.eql(u8, final_val, parsed_str)) allocator.free(parsed_str);
                 continue;
             }
@@ -452,18 +450,15 @@ pub const Config = struct {
             if (utils.getBool(raw_val)) |bool_val| {
                 const bool_str = if (bool_val) "true" else "false";
                 try config.map.put(full_key, try allocator.dupe(u8, bool_str));
-                full_key_used = true;
                 continue;
             }
 
             // * Handle an Int or Float
             if (std.fmt.parseInt(i64, raw_val, 10) catch null) |_| {
                 try config.map.put(full_key, try allocator.dupe(u8, raw_val));
-                full_key_used = true;
                 continue;
             } else if (std.fmt.parseFloat(f64, raw_val) catch null) |_| {
                 try config.map.put(full_key, try allocator.dupe(u8, raw_val));
-                full_key_used = true;
                 continue;
             }
 
@@ -471,7 +466,6 @@ pub const Config = struct {
             if (raw_val[0] == '[') {
                 const parsed_list = try utils.parseList(&config, raw_val, &lines, &multiline_buf, full_key, allocator);
                 try config.map.put(full_key, parsed_list);
-                full_key_used = true;
                 continue;
             }
 
@@ -480,7 +474,6 @@ pub const Config = struct {
                 const parsed_table = try utils.parseTable(&config, raw_val, &lines, &multiline_buf, full_key, allocator);
 
                 try config.map.put(full_key, parsed_table);
-                full_key_used = true;
                 continue;
             }
 
@@ -491,7 +484,6 @@ pub const Config = struct {
                 parsed_str;
 
             try config.map.put(full_key, final_val);
-            full_key_used = true;
 
             if (!std.mem.eql(u8, final_val, parsed_str)) allocator.free(parsed_str);
         }

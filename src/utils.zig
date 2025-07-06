@@ -66,7 +66,7 @@ pub fn parseString(
     multiline_buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) ![]const u8 {
-    if (raw_val.len == 0) return try allocator.dupe(u8, "");
+    if (raw_val.len == 0) return "";
 
     const is_basic = raw_val[0] == '"';
     if (raw_val.len >= 3 and (std.mem.startsWith(u8, raw_val, "\"\"\"") or std.mem.startsWith(u8, raw_val, "'''"))) {
