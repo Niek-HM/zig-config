@@ -4,4 +4,6 @@
 */main.zig
 *.ini
 *.env
+*.toml
+*.log
 src/*test*.zig

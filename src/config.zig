@@ -87,8 +87,8 @@ pub const Config = struct {
     /// - Parsed value as `T`
     /// - Error if the key is missing or the value is invalid for the given type
     pub fn getAs(self: *Config, comptime T: type, key: []const u8, allocator: std.mem.Allocator) !T {
-        const val = self.get(key) orelse return ConfigError.Missing;
-        const s = std.mem.trim(u8, val, " \t\r\n");
+        const val: []const u8 = self.get(key) orelse return ConfigError.Missing;
+        const s: []const u8 = std.mem.trim(u8, val, " \t\r\n");
         const info = @typeInfo(T);
 
         return switch (info) {
@@ -163,8 +163,8 @@ pub const Config = struct {
     /// try cfg.set("port", "8080");
     /// ```
     pub fn set(self: *Config, key: []const u8, value: []const u8) !void {
-        const key_copy = try self.map.allocator.dupe(u8, key);
-        const val_copy = try self.map.allocator.dupe(u8, value);
+        const key_copy: []u8 = try self.map.allocator.dupe(u8, key);
+        const val_copy: []u8 = try self.map.allocator.dupe(u8, value);
         try self.map.put(key_copy, val_copy);
     }
 
@@ -176,15 +176,15 @@ pub const Config = struct {
     /// Loads from the system environment into the Config;
     /// All variables from the process evironment are copied in.
     pub fn fromEnvMap(allocator: std.mem.Allocator) !Config {
-        var config = Config.init(allocator);
+        var config: Config = Config.init(allocator);
         errdefer config.deinit();
         var env_map = try std.process.getEnvMap(allocator);
         defer env_map.deinit();
 
         var it = env_map.iterator();
         while (it.next()) |entry| {
-            const key = try allocator.dupe(u8, entry.key_ptr.*);
-            const val = try allocator.dupe(u8, entry.value_ptr.*);
+            const key: []u8 = try allocator.dupe(u8, entry.key_ptr.*);
+            const val: []u8 = try allocator.dupe(u8, entry.value_ptr.*);
             try config.map.put(key, val);
         }
 
@@ -222,7 +222,7 @@ pub const Config = struct {
     ///
     /// Returns a new `Config` with fully resolved values.
     pub fn parseEnv(text: []const u8, allocator: std.mem.Allocator) !Config {
-        var config = Config.init(allocator);
+        var config: Config = Config.init(allocator);
         errdefer config.deinit();
 
         var raw_values = std.StringHashMap([]const u8).init(allocator);
@@ -240,7 +240,7 @@ pub const Config = struct {
 
         var lines = std.mem.splitSequence(u8, text, "\n");
         while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
             const kv = try parseLine(trimmed);
@@ -248,10 +248,10 @@ pub const Config = struct {
             // Parse strings
             var single_line_iter = std.mem.splitSequence(u8, "", "\n");
 
-            const parsed_value = try utils.parseString(kv.value, &single_line_iter, &dummy_buf, allocator);
+            const parsed_value: []const u8 = try utils.parseString(kv.value, &single_line_iter, &dummy_buf, allocator);
             errdefer allocator.free(parsed_value);
 
-            const key_copy = try allocator.dupe(u8, kv.key);
+            const key_copy: []u8 = try allocator.dupe(u8, kv.key);
             errdefer allocator.free(key_copy);
             try raw_values.put(key_copy, parsed_value);
         }
@@ -259,7 +259,7 @@ pub const Config = struct {
         // Resolve substitutions like ${VAR}, using env fallback
         var it = raw_values.iterator();
         while (it.next()) |entry| {
-            const resolved = try utils.resolveVariables(
+            const resolved: []const u8 = try utils.resolveVariables(
                 entry.value_ptr.*,
                 &config,
                 allocator,
@@ -269,9 +269,9 @@ pub const Config = struct {
             );
             errdefer allocator.free(resolved);
 
-            const key_copy = try allocator.dupe(u8, entry.key_ptr.*);
+            const key_copy: []u8 = try allocator.dupe(u8, entry.key_ptr.*);
             errdefer allocator.free(key_copy);
-            const val_copy = try allocator.dupe(u8, resolved);
+            const val_copy: []u8 = try allocator.dupe(u8, resolved);
             errdefer allocator.free(val_copy);
             try config.map.put(key_copy, val_copy);
 
@@ -307,13 +307,13 @@ pub const Config = struct {
     ///
     /// Returns a new `Config` with all keys fully parsed and namespaced by section.
     pub fn parseIni(text: []const u8, allocator: std.mem.Allocator) !Config {
-        var config = Config.init(allocator);
+        var config: Config = Config.init(allocator);
         errdefer config.deinit();
         var current_section: ?[]const u8 = null;
 
         var lines = std.mem.splitSequence(u8, text, "\n");
         while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, "\t\r\n");
+            const trimmed: []const u8 = std.mem.trim(u8, line, "\t\r\n");
             if (trimmed.len == 0 or trimmed[0] == '#' or trimmed[0] == ';') continue;
 
             if (trimmed.len < 3 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']')
@@ -321,7 +321,7 @@ pub const Config = struct {
 
             // Handle section headers
             if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') {
-                const name = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
+                const name: []const u8 = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t\r\n");
                 if (name.len == 0) return ConfigError.ParseUnterminatedSection;
                 current_section = name;
                 continue;
@@ -331,7 +331,7 @@ pub const Config = struct {
             const kv = try parseLine(trimmed);
 
             // Create full key as "section.key" or just "key"
-            const full_key = blk: {
+            const full_key: []u8 = blk: {
                 if (current_section) |sec| {
                     break :blk try std.fmt.allocPrint(allocator, "{s}.{s}", .{ sec, kv.key });
                 } else {
@@ -345,12 +345,12 @@ pub const Config = struct {
             defer dummy_buf.deinit();
 
             // Parse strings
-            const parsed = try utils.parseString(kv.value, &dummy_lines, &dummy_buf, allocator);
+            const parsed: []const u8 = try utils.parseString(kv.value, &dummy_lines, &dummy_buf, allocator);
             defer allocator.free(parsed);
 
             var resolved: []const u8 = parsed;
-            const needs_resolve = std.mem.indexOfScalar(u8, parsed, '$') != null;
-            var resolved_owned = false;
+            const needs_resolve: bool = std.mem.indexOfScalar(u8, parsed, '$') != null;
+            var resolved_owned: bool = false;
 
             if (needs_resolve) {
                 resolved = try utils.resolveVariables(parsed, &config, allocator, null, full_key, null);
@@ -358,7 +358,7 @@ pub const Config = struct {
             }
             defer if (resolved_owned) allocator.free(resolved);
 
-            const val_copy = try allocator.dupe(u8, resolved);
+            const val_copy: []u8 = try allocator.dupe(u8, resolved);
             errdefer allocator.free(val_copy);
 
             const gop = try config.map.getOrPut(full_key);
@@ -395,7 +395,7 @@ pub const Config = struct {
     /// - Multiline strings (triple-quoted)
     /// Fully unescapes strings and flattens all data into a dot-separated key map.
     pub fn parseToml(text: []const u8, allocator: std.mem.Allocator) ConfigError!Config {
-        var config = Config.init(allocator);
+        var config: Config = Config.init(allocator);
         errdefer config.deinit();
         var current_prefix: []const u8 = "";
 
@@ -407,10 +407,10 @@ pub const Config = struct {
 
         var lines = std.mem.splitSequence(u8, text, "\n");
         while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-            const comment_pos = std.mem.indexOfScalar(u8, trimmed, '#');
+            const comment_pos: ?usize = std.mem.indexOfScalar(u8, trimmed, '#');
             const line_clean = if (comment_pos) |i|
                 std.mem.trim(u8, trimmed[0..i], " \t\r\n")
             else
@@ -419,8 +419,8 @@ pub const Config = struct {
 
             // Section: [[array]]
             if (std.mem.startsWith(u8, line_clean, "[[") and std.mem.endsWith(u8, line_clean, "]]")) {
-                const table_key = std.mem.trim(u8, line_clean[2 .. line_clean.len - 2], " ");
-                const count = table_arrays.get(table_key) orelse 0;
+                const table_key: []const u8 = std.mem.trim(u8, line_clean[2 .. line_clean.len - 2], " ");
+                const count: usize = table_arrays.get(table_key) orelse 0;
                 try table_arrays.put(table_key, count + 1);
 
                 if (current_prefix.len > 0) allocator.free(current_prefix);
@@ -432,11 +432,11 @@ pub const Config = struct {
                 continue;
             }
 
-            const eq_idx = std.mem.indexOfScalar(u8, line_clean, '=') orelse continue;
-            const raw_key = std.mem.trim(u8, line_clean[0..eq_idx], " \t\r\n");
-            const raw_val = std.mem.trim(u8, line_clean[eq_idx + 1 ..], " \t\r\n");
+            const eq_idx: usize = std.mem.indexOfScalar(u8, line_clean, '=') orelse continue;
+            const raw_key: []const u8 = std.mem.trim(u8, line_clean[0..eq_idx], " \t\r\n");
+            const raw_val: []const u8 = std.mem.trim(u8, line_clean[eq_idx + 1 ..], " \t\r\n");
 
-            const full_key = if (current_prefix.len > 0)
+            const full_key: []u8 = if (current_prefix.len > 0)
                 try std.fmt.allocPrint(allocator, "{s}.{s}", .{ current_prefix, raw_key })
             else
                 try allocator.dupe(u8, raw_key);
@@ -450,8 +450,8 @@ pub const Config = struct {
                 defer allocator.free(parsed);
 
                 var resolved: []const u8 = parsed;
-                const needs_resolve = std.mem.indexOfScalar(u8, parsed, '$') != null;
-                var resolved_owned = false;
+                const needs_resolve: bool = std.mem.indexOfScalar(u8, parsed, '$') != null;
+                var resolved_owned: bool = false;
 
                 if (needs_resolve) {
                     resolved = try utils.resolveVariables(parsed, &config, allocator, null, full_key, null);
@@ -459,7 +459,7 @@ pub const Config = struct {
                 }
                 defer if (resolved_owned) allocator.free(resolved);
 
-                const val_copy = try allocator.dupe(u8, resolved);
+                const val_copy: []u8 = try allocator.dupe(u8, resolved);
                 errdefer allocator.free(val_copy);
 
                 if (config.map.getEntry(full_key)) |entry_ptr| {
@@ -527,7 +527,7 @@ pub const Config = struct {
 
             // Handle inline table
             if (raw_val[0] == '{') {
-                const parsed_table = try utils.parseTable(&config, raw_val, &lines, &multiline_buf, full_key, allocator);
+                const parsed_table: []const u8 = try utils.parseTable(&config, raw_val, &lines, &multiline_buf, full_key, allocator);
                 errdefer allocator.free(parsed_table);
 
                 if (config.map.getEntry(full_key)) |entry_ptr| {
@@ -576,9 +576,9 @@ pub const Config = struct {
     /// - `ParseInvalidLine` if no `=` is found
     /// - `InvalidKey` if the key is empty
     fn parseLine(line: []const u8) !struct { key: []const u8, value: []const u8 } {
-        const eq_index = std.mem.indexOf(u8, line, "=") orelse return ConfigError.ParseInvalidLine;
-        const key = std.mem.trim(u8, line[0..eq_index], " \t");
-        var value = std.mem.trim(u8, line[eq_index + 1 ..], " \t");
+        const eq_index: usize = std.mem.indexOf(u8, line, "=") orelse return ConfigError.ParseInvalidLine;
+        const key: []const u8 = std.mem.trim(u8, line[0..eq_index], " \t");
+        var value: []const u8 = std.mem.trim(u8, line[eq_index + 1 ..], " \t");
 
         value = utils.stripQuotes(value);
 
@@ -598,7 +598,7 @@ pub const Config = struct {
     /// Returns a list of all keys in the config
     /// Caller is responsible for freeing the returned array
     pub fn keys(self: *Config, allocator: std.mem.Allocator) ![][]const u8 {
-        var key = try allocator.alloc([]const u8, self.map.count());
+        var key: [][]const u8 = try allocator.alloc([]const u8, self.map.count());
         var it = self.map.iterator();
         var i: usize = 0;
 
@@ -621,19 +621,19 @@ pub const Config = struct {
     ///
     /// Caller must `deinit` the returned config.
     pub fn getSection(self: *Config, section: []const u8, allocator: std.mem.Allocator) !Config {
-        var result = Config.init(allocator);
-        const prefix = try std.fmt.allocPrint(allocator, "{s}.", .{section});
+        var result: Config = Config.init(allocator);
+        const prefix: []u8 = try std.fmt.allocPrint(allocator, "{s}.", .{section});
         defer allocator.free(prefix);
 
         var it = self.map.iterator();
         var found: bool = false;
 
         while (it.next()) |entry| {
-            const key = entry.key_ptr.*;
+            const key: []const u8 = entry.key_ptr.*;
             if (std.mem.startsWith(u8, key, prefix)) {
-                const stripped = key[prefix.len..];
-                const k_copy = try allocator.dupe(u8, stripped);
-                const v_copy = try allocator.dupe(u8, entry.value_ptr.*);
+                const stripped: []const u8 = key[prefix.len..];
+                const k_copy: []u8 = try allocator.dupe(u8, stripped);
+                const v_copy: []u8 = try allocator.dupe(u8, entry.value_ptr.*);
 
                 try result.map.put(k_copy, v_copy);
                 found = true;
@@ -707,16 +707,16 @@ pub const Config = struct {
 
         var it = self.map.iterator();
         while (it.next()) |entry| {
-            const full_key = entry.key_ptr.*;
-            const val = entry.value_ptr.*;
-            const dot = std.mem.indexOfScalar(u8, full_key, '.') orelse {
+            const full_key: []const u8 = entry.key_ptr.*;
+            const val: []const u8 = entry.value_ptr.*;
+            const dot: usize = std.mem.indexOfScalar(u8, full_key, '.') orelse {
                 // Keys without section go at the top
                 try writer.print("{s} = {s}\n", .{ full_key, val });
                 continue;
             };
 
-            const section = full_key[0..dot];
-            const key = full_key[dot + 1 ..];
+            const section: []const u8 = full_key[0..dot];
+            const key: []const u8 = full_key[dot + 1 ..];
 
             const entry_val = IniEntry{
                 .key = key,
@@ -787,11 +787,11 @@ pub const Config = struct {
 
         // * 1. First write all top-level keys (no section)
         for (sorted_keys.items) |key| {
-            const sep_index = std.mem.lastIndexOfScalar(u8, key, '.');
+            const sep_index: ?usize = std.mem.lastIndexOfScalar(u8, key, '.');
             if (sep_index != null) continue;
 
-            const val = cfg.map.get(key).?;
-            const escaped = try utils.escapeString(val, cfg.map.allocator);
+            const val: []const u8 = cfg.map.get(key).?;
+            const escaped: []const u8 = try utils.escapeString(val, cfg.map.allocator);
             defer cfg.map.allocator.free(escaped);
 
             try writer.print("{s} = \"{s}\"\n", .{ key, escaped });
@@ -800,19 +800,19 @@ pub const Config = struct {
         // * 2. Then write sectioned keys grouped under [section]
         var current_section: ?[]const u8 = null;
         for (sorted_keys.items) |key| {
-            const sep_index = std.mem.lastIndexOfScalar(u8, key, '.');
+            const sep_index: ?usize = std.mem.lastIndexOfScalar(u8, key, '.');
             if (sep_index == null) continue;
 
             const section = key[0..sep_index.?];
             const subkey = key[sep_index.? + 1 ..];
-            const val = cfg.map.get(key).?;
+            const val: []const u8 = cfg.map.get(key).?;
 
             if (!std.mem.eql(u8, current_section orelse "", section)) {
                 current_section = section;
                 try writer.print("\n[{s}]\n", .{section});
             }
 
-            const escaped = try utils.escapeString(val, cfg.map.allocator);
+            const escaped: []const u8 = try utils.escapeString(val, cfg.map.allocator);
             defer cfg.map.allocator.free(escaped);
 
             try writer.print("{s} = \"{s}\"\n", .{ subkey, escaped });

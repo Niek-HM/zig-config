@@ -21,6 +21,17 @@ pub const VariableExpr = struct {
     };
 };
 
+const Value = union(enum) {
+    string: []const u8,
+    int: i64,
+    float: f64,
+    bool: bool,
+    list: []Value,
+    table: Table,
+};
+
+const Table: type = std.StringHashMap(Value);
+
 /// Parses a variable expression inside `${...}` and splits it into:
 /// - The variable name
 /// - Optional fallback string
@@ -71,20 +82,20 @@ pub fn parseString(
 ) ![]const u8 {
     if (raw_val.len == 0) return "";
 
-    const is_basic = raw_val[0] == '"';
-    const is_literal = raw_val[0] == '\'';
-    const is_multiline = raw_val.len >= 3 and
+    const is_basic: bool = raw_val[0] == '"';
+    const is_literal: bool = raw_val[0] == '\'';
+    const is_multiline: bool = raw_val.len >= 3 and
         (std.mem.startsWith(u8, raw_val, "\"\"\"") or
             std.mem.startsWith(u8, raw_val, "'''"));
 
     // Handle multiline case
     if (is_multiline) {
-        const quote_type = if (is_basic) "\"\"\"" else "'''";
+        const quote_type: *const [3:0]u8 = if (is_basic) "\"\"\"" else "'''";
         multiline_buf.clearRetainingCapacity();
 
         // Same-line triple quoted value
         if (std.mem.endsWith(u8, raw_val, quote_type)) {
-            const inner = raw_val[3 .. raw_val.len - 3];
+            const inner: []const u8 = raw_val[3 .. raw_val.len - 3];
             return if (is_basic)
                 try unescapeString(inner, allocator)
             else
@@ -98,7 +109,7 @@ pub fn parseString(
         }
 
         while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
             if (findUnescaped(trimmed, quote_type)) |end_pos| {
                 try multiline_buf.appendSlice(trimmed[0..end_pos]);
                 break;
@@ -111,7 +122,7 @@ pub fn parseString(
         const joined = try multiline_buf.toOwnedSlice();
 
         if (is_basic) {
-            const result = try unescapeString(joined, allocator);
+            const result: []const u8 = try unescapeString(joined, allocator);
             allocator.free(joined);
             return result;
         } else {
@@ -124,7 +135,7 @@ pub fn parseString(
         ((is_basic and raw_val[raw_val.len - 1] == '"') or
             (is_literal and raw_val[raw_val.len - 1] == '\'')))
     {
-        const inner = raw_val[1 .. raw_val.len - 1];
+        const inner: []const u8 = raw_val[1 .. raw_val.len - 1];
         return if (is_basic)
             try unescapeString(inner, allocator)
         else
@@ -180,11 +191,11 @@ pub fn parseList(
 
     defer if (owns_full_array) allocator.free(full_array);
 
-    var trimmed = std.mem.trim(u8, full_array, " \t\r\n");
+    var trimmed: []const u8 = std.mem.trim(u8, full_array, " \t\r\n");
     trimmed = try std.mem.replaceOwned(u8, allocator, trimmed, " ", "");
     defer allocator.free(trimmed);
 
-    var content = trimmed;
+    var content: []const u8 = trimmed;
     var owns_content: bool = false;
 
     if (std.mem.endsWith(u8, content, ",]")) {
@@ -210,9 +221,9 @@ pub fn parseList(
             while (it.next()) |sub_entry| {
                 const nested: []u8 = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ full_key, sub_entry.key_ptr.* });
 
-                const key_copy = try allocator.dupe(u8, nested);
+                const key_copy: []u8 = try allocator.dupe(u8, nested);
                 errdefer allocator.free(key_copy);
-                const val_copy = try allocator.dupe(u8, sub_entry.value_ptr.*);
+                const val_copy: []u8 = try allocator.dupe(u8, sub_entry.value_ptr.*);
                 errdefer allocator.free(val_copy);
 
                 if (config.map.getEntry(key_copy)) |entry_ptr| {
@@ -251,8 +262,12 @@ pub fn parseTable(
 
         var depth: usize = 1;
         while (lines.next()) |line| {
+            try multiline_buf.appendSlice(line);
+            try multiline_buf.append('\n');
+
             const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0) continue;
+
             for (trimmed) |c| switch (c) {
                 '{', '[' => depth += 1,
                 '}', ']' => if (depth > 0) {
@@ -261,8 +276,8 @@ pub fn parseTable(
                 else => {},
             };
 
-            try multiline_buf.appendSlice(trimmed);
-            try multiline_buf.append('\n');
+            //try multiline_buf.appendSlice(trimmed);
+            //try multiline_buf.append('\n');
             if (depth == 0) break;
         }
 
@@ -283,7 +298,7 @@ pub fn parseTable(
     var in_quote: ?u8 = null;
     var i: usize = 0;
     while (i < content.len) {
-        const c = content[i];
+        const c: u8 = content[i];
         if (in_quote) |quote| {
             if (c == quote) {
                 in_quote = null;
@@ -308,7 +323,7 @@ pub fn parseTable(
     }
 
     if (start < content.len) {
-        const last = std.mem.trim(u8, content[start..], " \t\r\n");
+        const last: []const u8 = std.mem.trim(u8, content[start..], " \t\r\n");
         if (last.len > 0) try pairs.append(last);
     }
 
@@ -319,30 +334,33 @@ pub fn parseTable(
         if (nested_key) |k| allocator.free(k);
         nested_key = null;
 
-        const sep = std.mem.indexOfScalar(u8, pair, '=') orelse return ConfigError.ParseInvalidLine;
-        const key = std.mem.trim(u8, pair[0..sep], " \t\r\n");
-        const val = std.mem.trim(u8, pair[sep + 1 ..], " \t\r\n");
+        const trimmed_pair: []const u8 = std.mem.trim(u8, pair, " \t\r\n");
+        if (trimmed_pair.len == 0 or !std.mem.containsAtLeast(u8, trimmed_pair, 1, "=")) continue;
+
+        const sep: usize = std.mem.indexOfScalar(u8, pair, '=') orelse return ConfigError.ParseInvalidLine;
+        const key: []const u8 = std.mem.trim(u8, pair[0..sep], " \t\r\n");
+        const val: []const u8 = std.mem.trim(u8, pair[sep + 1 ..], " \t\r\n");
 
         nested_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ full_key, key });
 
         if (val.len >= 2 and val[0] == '{' and val[val.len - 1] == '}') {
-            const parsed = try parseTable(config, val, lines, multiline_buf, nested_key.?, allocator);
+            const parsed: []const u8 = try parseTable(config, val, lines, multiline_buf, nested_key.?, allocator);
             allocator.free(parsed);
             allocator.free(nested_key.?);
             nested_key = null;
             continue;
         } else if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']') {
-            const parsed = try parseList(config, val, lines, multiline_buf, nested_key.?, allocator);
+            const parsed: []const u8 = try parseList(config, val, lines, multiline_buf, nested_key.?, allocator);
             allocator.free(parsed);
             allocator.free(nested_key.?);
             nested_key = null;
             continue;
         } else {
-            const stripped_val = stripQuotes(val);
-            const new_val = try allocator.dupe(u8, stripped_val);
+            const stripped_val: []const u8 = stripQuotes(val);
+            const new_val: []u8 = try allocator.dupe(u8, stripped_val);
             errdefer allocator.free(new_val);
 
-            const key_copy = try allocator.dupe(u8, nested_key.?);
+            const key_copy: []u8 = try allocator.dupe(u8, nested_key.?);
             errdefer allocator.free(key_copy);
 
             if (config.map.getEntry(key_copy)) |entry_ptr| {
@@ -356,7 +374,6 @@ pub fn parseTable(
             nested_key = null;
         }
     }
-
     return try allocator.dupe(u8, std.mem.trim(u8, full_table, " \t\r\n"));
 }
 
@@ -405,7 +422,7 @@ pub fn resolveVariables(
                 j += 1;
             }
             if (brace_depth != 0) return ConfigError.InvalidPlaceholder;
-            const inside = value[i + 2 .. j - 1];
+            const inside: []const u8 = value[i + 2 .. j - 1];
 
             const parsed = try parseVariableExpression(inside);
 
@@ -429,7 +446,7 @@ pub fn resolveVariables(
                 }
                 const env_val = std.process.getEnvVarOwned(allocator, parsed.var_name) catch null;
                 if (env_val) |e| {
-                    const copy = try allocator.dupe(u8, e);
+                    const copy: []u8 = try allocator.dupe(u8, e);
                     allocator.free(e);
                     break :blk ResolvedValue{ .value = copy, .owned = true };
                 }
@@ -440,8 +457,8 @@ pub fn resolveVariables(
             switch (parsed.operator) {
                 .none => {
                     if (val_opt) |val_data| {
-                        const val = val_data.value;
-                        const rec = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
+                        const val: []const u8 = val_data.value;
+                        const rec: []const u8 = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
                         errdefer allocator.free(rec);
                         try result.appendSlice(rec);
                         allocator.free(rec);
@@ -450,7 +467,7 @@ pub fn resolveVariables(
                         continue;
                     }
                     if (parsed.fallback) |fb| {
-                        const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
+                        const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                         errdefer allocator.free(fb_val);
                         try result.appendSlice(fb_val);
                         allocator.free(fb_val);
@@ -461,9 +478,9 @@ pub fn resolveVariables(
                 },
                 .colon_dash => {
                     if (val_opt) |val_data| {
-                        const val = val_data.value;
+                        const val: []const u8 = val_data.value;
                         if (val.len > 0) {
-                            const rec = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
+                            const rec: []const u8 = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
                             errdefer allocator.free(rec);
                             try result.appendSlice(rec);
                             allocator.free(rec);
@@ -474,7 +491,7 @@ pub fn resolveVariables(
                         if (val_data.owned) allocator.free(val);
                     }
                     if (parsed.fallback) |fb| {
-                        const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
+                        const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                         errdefer allocator.free(fb_val);
                         try result.appendSlice(fb_val);
                         allocator.free(fb_val);
@@ -485,8 +502,8 @@ pub fn resolveVariables(
                 },
                 .dash => {
                     if (val_opt) |val_data| {
-                        const val = val_data.value;
-                        const rec = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
+                        const val: []const u8 = val_data.value;
+                        const rec: []const u8 = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
                         errdefer allocator.free(rec);
                         try result.appendSlice(rec);
                         allocator.free(rec);
@@ -495,7 +512,7 @@ pub fn resolveVariables(
                         continue;
                     }
                     if (parsed.fallback) |fb| {
-                        const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
+                        const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                         errdefer allocator.free(fb_val);
                         try result.appendSlice(fb_val);
                         allocator.free(fb_val);
@@ -506,10 +523,10 @@ pub fn resolveVariables(
                 },
                 .colon_plus => {
                     if (val_opt) |val_data| {
-                        const val = val_data.value;
+                        const val: []const u8 = val_data.value;
                         if (val.len > 0) {
                             if (parsed.fallback) |fb| {
-                                const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
+                                const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                                 errdefer allocator.free(fb_val);
                                 try result.appendSlice(fb_val);
                                 allocator.free(fb_val);
@@ -526,7 +543,7 @@ pub fn resolveVariables(
                 .plus => {
                     if (val_opt) |val_data| {
                         if (parsed.fallback) |fb| {
-                            const fb_val = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
+                            const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
                             errdefer allocator.free(fb_val);
                             try result.appendSlice(fb_val);
                             allocator.free(fb_val);
@@ -607,10 +624,10 @@ pub fn unescapeString(s: []const u8, allocator: std.mem.Allocator) ![]const u8 {
                 'u' => {
                     if (i + 4 >= s.len)
                         return ConfigError.InvalidUnicodeEscape;
-                    const hex = s[i + 1 .. i + 5];
-                    const cp = std.fmt.parseInt(u21, hex, 16) catch return ConfigError.InvalidUnicodeEscape;
+                    const hex: []const u8 = s[i + 1 .. i + 5];
+                    const cp: u21 = std.fmt.parseInt(u21, hex, 16) catch return ConfigError.InvalidUnicodeEscape;
                     var buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(cp, &buf) catch return ConfigError.InvalidUnicodeEscape;
+                    const len: u3 = std.unicode.utf8Encode(cp, &buf) catch return ConfigError.InvalidUnicodeEscape;
                     try out.appendSlice(buf[0..len]);
                     i += 5;
                     continue;
@@ -618,10 +635,10 @@ pub fn unescapeString(s: []const u8, allocator: std.mem.Allocator) ![]const u8 {
                 'U' => {
                     if (i + 8 >= s.len)
                         return ConfigError.InvalidUnicodeEscape;
-                    const hex = s[i + 1 .. i + 9];
-                    const cp = std.fmt.parseInt(u21, hex, 16) catch return ConfigError.InvalidUnicodeEscape;
+                    const hex: []const u8 = s[i + 1 .. i + 9];
+                    const cp: u21 = std.fmt.parseInt(u21, hex, 16) catch return ConfigError.InvalidUnicodeEscape;
                     var buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(cp, &buf) catch return ConfigError.InvalidUnicodeEscape;
+                    const len: u3 = std.unicode.utf8Encode(cp, &buf) catch return ConfigError.InvalidUnicodeEscape;
                     try out.appendSlice(buf[0..len]);
                     i += 9;
                     continue;
@@ -660,7 +677,7 @@ pub fn escapeString(s: []const u8, allocator: std.mem.Allocator) ![]const u8 {
                 if (cp < 0x20 or cp == 0x7F) {
                     try out.appendSlice("\\u");
                     var buf: [8]u8 = undefined;
-                    const raw = try std.fmt.bufPrint(&buf, "{x}", .{cp});
+                    const raw: []u8 = try std.fmt.bufPrint(&buf, "{x}", .{cp});
                     const pad_len = 4 - raw.len;
                     for (0..pad_len) |_| try out.append('0');
                     try out.appendSlice(raw);
