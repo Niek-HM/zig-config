@@ -122,7 +122,7 @@ pub const Config = struct {
                     const content = std.mem.trim(u8, s[1 .. s.len - 1], " \t\r\n");
 
                     // choose correct list type
-                    var list = if (Item == []const u8) std.ArrayList([]const u8).init(allocator) else std.ArrayList(Item).init(allocator);
+                    var list = std.ArrayList(Item).init(allocator);
                     if (content.len == 0) return try list.toOwnedSlice();
 
                     var it = std.mem.splitSequence(u8, content, ",");
@@ -135,8 +135,7 @@ pub const Config = struct {
                             .float, .comptime_float => std.fmt.parseFloat(Item, part) catch return ConfigError.InvalidFloat,
                             .bool => utils.getBool(part) orelse return ConfigError.InvalidBool,
                             .pointer => |item_ptr| if (item_ptr.size == .slice and item_ptr.child == u8) blk_str_arr: {
-                                var p = part;
-                                p = utils.stripQuotes(p);
+                                const p = utils.stripQuotes(part);
                                 const duped = try allocator.dupe(u8, p);
                                 break :blk_str_arr duped;
                             } else return ConfigError.InvalidPlaceholder,
@@ -178,14 +177,15 @@ pub const Config = struct {
     /// All variables from the process evironment are copied in.
     pub fn fromEnvMap(allocator: std.mem.Allocator) !Config {
         var config = Config.init(allocator);
+        errdefer config.deinit();
         var env_map = try std.process.getEnvMap(allocator);
         defer env_map.deinit();
 
         var it = env_map.iterator();
         while (it.next()) |entry| {
-            const k = try allocator.dupe(u8, entry.key_ptr.*);
-            const v = try allocator.dupe(u8, entry.value_ptr.*);
-            try config.map.put(k, v);
+            const key = try allocator.dupe(u8, entry.key_ptr.*);
+            const val = try allocator.dupe(u8, entry.value_ptr.*);
+            try config.map.put(key, val);
         }
 
         return config;
@@ -223,6 +223,7 @@ pub const Config = struct {
     /// Returns a new `Config` with fully resolved values.
     pub fn parseEnv(text: []const u8, allocator: std.mem.Allocator) !Config {
         var config = Config.init(allocator);
+        errdefer config.deinit();
 
         var raw_values = std.StringHashMap([]const u8).init(allocator);
         defer {
@@ -251,6 +252,7 @@ pub const Config = struct {
             errdefer allocator.free(parsed_value);
 
             const key_copy = try allocator.dupe(u8, kv.key);
+            errdefer allocator.free(key_copy);
             try raw_values.put(key_copy, parsed_value);
         }
 
@@ -268,8 +270,11 @@ pub const Config = struct {
             errdefer allocator.free(resolved);
 
             const key_copy = try allocator.dupe(u8, entry.key_ptr.*);
+            errdefer allocator.free(key_copy);
             const val_copy = try allocator.dupe(u8, resolved);
+            errdefer allocator.free(val_copy);
             try config.map.put(key_copy, val_copy);
+
             allocator.free(resolved);
         }
 
@@ -303,6 +308,7 @@ pub const Config = struct {
     /// Returns a new `Config` with all keys fully parsed and namespaced by section.
     pub fn parseIni(text: []const u8, allocator: std.mem.Allocator) !Config {
         var config = Config.init(allocator);
+        errdefer config.deinit();
         var current_section: ?[]const u8 = null;
 
         var lines = std.mem.splitSequence(u8, text, "\n");
@@ -340,12 +346,20 @@ pub const Config = struct {
 
             // Parse strings
             const parsed = try utils.parseString(kv.value, &dummy_lines, &dummy_buf, allocator);
+            defer allocator.free(parsed);
 
-            // Resolve any ${VAR} substitutions
-            const resolved = if (std.mem.indexOfScalar(u8, parsed, '$') != null)
-                try utils.resolveVariables(parsed, &config, allocator, null, full_key, null)
-            else
-                parsed;
+            var resolved: []const u8 = parsed;
+            const needs_resolve = std.mem.indexOfScalar(u8, parsed, '$') != null;
+            var resolved_owned = false;
+
+            if (needs_resolve) {
+                resolved = try utils.resolveVariables(parsed, &config, allocator, null, full_key, null);
+                resolved_owned = true;
+            }
+            defer if (resolved_owned) allocator.free(resolved);
+
+            const val_copy = try allocator.dupe(u8, resolved);
+            errdefer allocator.free(val_copy);
 
             const gop = try config.map.getOrPut(full_key);
             if (gop.found_existing) {
@@ -353,9 +367,7 @@ pub const Config = struct {
                 allocator.free(gop.value_ptr.*);
             }
             gop.key_ptr.* = full_key;
-            gop.value_ptr.* = resolved;
-
-            if (!std.mem.eql(u8, resolved, parsed)) allocator.free(parsed);
+            gop.value_ptr.* = val_copy;
         }
 
         return config;
@@ -384,6 +396,7 @@ pub const Config = struct {
     /// Fully unescapes strings and flattens all data into a dot-separated key map.
     pub fn parseToml(text: []const u8, allocator: std.mem.Allocator) ConfigError!Config {
         var config = Config.init(allocator);
+        errdefer config.deinit();
         var current_prefix: []const u8 = "";
 
         var multiline_buf = std.ArrayList(u8).init(allocator);
@@ -397,7 +410,6 @@ pub const Config = struct {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
 
-            // * Remove comments
             const comment_pos = std.mem.indexOfScalar(u8, trimmed, '#');
             const line_clean = if (comment_pos) |i|
                 std.mem.trim(u8, trimmed[0..i], " \t\r\n")
@@ -405,7 +417,7 @@ pub const Config = struct {
                 trimmed;
             if (line_clean.len == 0) continue;
 
-            // * Set section name
+            // Section: [[array]]
             if (std.mem.startsWith(u8, line_clean, "[[") and std.mem.endsWith(u8, line_clean, "]]")) {
                 const table_key = std.mem.trim(u8, line_clean[2 .. line_clean.len - 2], " ");
                 const count = table_arrays.get(table_key) orelse 0;
@@ -420,7 +432,6 @@ pub const Config = struct {
                 continue;
             }
 
-            // * Get key and value
             const eq_idx = std.mem.indexOfScalar(u8, line_clean, '=') orelse continue;
             const raw_key = std.mem.trim(u8, line_clean[0..eq_idx], " \t\r\n");
             const raw_val = std.mem.trim(u8, line_clean[eq_idx + 1 ..], " \t\r\n");
@@ -431,61 +442,126 @@ pub const Config = struct {
                 try allocator.dupe(u8, raw_key);
             errdefer allocator.free(full_key);
 
-            // * Handle Strings
+            // Handle strings
             if (raw_val.len >= 1 and (raw_val[0] == '"' or raw_val[0] == '\'' or
                 std.mem.startsWith(u8, raw_val, "\"\"\"") or std.mem.startsWith(u8, raw_val, "'''")))
             {
-                const parsed_str = try utils.parseString(raw_val, &lines, &multiline_buf, allocator);
-                const final_val = if (std.mem.indexOfScalar(u8, parsed_str, '$') != null)
-                    try utils.resolveVariables(parsed_str, &config, allocator, null, full_key, null)
-                else
-                    parsed_str;
+                const parsed: []const u8 = try utils.parseString(raw_val, &lines, &multiline_buf, allocator);
+                defer allocator.free(parsed);
 
-                try config.map.put(full_key, final_val);
-                if (!std.mem.eql(u8, final_val, parsed_str)) allocator.free(parsed_str);
+                var resolved: []const u8 = parsed;
+                const needs_resolve = std.mem.indexOfScalar(u8, parsed, '$') != null;
+                var resolved_owned = false;
+
+                if (needs_resolve) {
+                    resolved = try utils.resolveVariables(parsed, &config, allocator, null, full_key, null);
+                    resolved_owned = true;
+                }
+                defer if (resolved_owned) allocator.free(resolved);
+
+                const val_copy = try allocator.dupe(u8, resolved);
+                errdefer allocator.free(val_copy);
+
+                if (config.map.getEntry(full_key)) |entry_ptr| {
+                    allocator.free(entry_ptr.key_ptr.*);
+                    allocator.free(entry_ptr.value_ptr.*);
+                    _ = config.map.remove(full_key);
+                }
+                try config.map.put(full_key, val_copy);
                 continue;
             }
 
-            // * Handle booleans
+            // Handle bool
             if (utils.getBool(raw_val)) |bool_val| {
                 const bool_str = if (bool_val) "true" else "false";
-                try config.map.put(full_key, try allocator.dupe(u8, bool_str));
+                const val_copy = try allocator.dupe(u8, bool_str);
+                errdefer allocator.free(val_copy);
+
+                if (config.map.getEntry(full_key)) |entry_ptr| {
+                    allocator.free(entry_ptr.key_ptr.*);
+                    allocator.free(entry_ptr.value_ptr.*);
+                    _ = config.map.remove(full_key);
+                }
+                try config.map.put(full_key, val_copy);
                 continue;
             }
 
-            // * Handle an Int or Float
+            // Handle int / float
             if (std.fmt.parseInt(i64, raw_val, 10) catch null) |_| {
-                try config.map.put(full_key, try allocator.dupe(u8, raw_val));
+                const val_copy = try allocator.dupe(u8, raw_val);
+                errdefer allocator.free(val_copy);
+
+                if (config.map.getEntry(full_key)) |entry_ptr| {
+                    allocator.free(entry_ptr.key_ptr.*);
+                    allocator.free(entry_ptr.value_ptr.*);
+                    _ = config.map.remove(full_key);
+                }
+                try config.map.put(full_key, val_copy);
                 continue;
             } else if (std.fmt.parseFloat(f64, raw_val) catch null) |_| {
-                try config.map.put(full_key, try allocator.dupe(u8, raw_val));
+                const val_copy = try allocator.dupe(u8, raw_val);
+                errdefer allocator.free(val_copy);
+
+                if (config.map.getEntry(full_key)) |entry_ptr| {
+                    allocator.free(entry_ptr.key_ptr.*);
+                    allocator.free(entry_ptr.value_ptr.*);
+                    _ = config.map.remove(full_key);
+                }
+                try config.map.put(full_key, val_copy);
                 continue;
             }
 
-            // * Handle Arrays
+            // Handle array
             if (raw_val[0] == '[') {
                 const parsed_list = try utils.parseList(&config, raw_val, &lines, &multiline_buf, full_key, allocator);
+                errdefer allocator.free(parsed_list);
+
+                if (config.map.getEntry(full_key)) |entry_ptr| {
+                    allocator.free(entry_ptr.key_ptr.*);
+                    allocator.free(entry_ptr.value_ptr.*);
+                    _ = config.map.remove(full_key);
+                }
                 try config.map.put(full_key, parsed_list);
                 continue;
             }
 
-            // * Handle Tables
+            // Handle inline table
             if (raw_val[0] == '{') {
                 const parsed_table = try utils.parseTable(&config, raw_val, &lines, &multiline_buf, full_key, allocator);
+                errdefer allocator.free(parsed_table);
 
+                if (config.map.getEntry(full_key)) |entry_ptr| {
+                    allocator.free(entry_ptr.key_ptr.*);
+                    allocator.free(entry_ptr.value_ptr.*);
+                    _ = config.map.remove(full_key);
+                }
                 try config.map.put(full_key, parsed_table);
                 continue;
             }
 
-            const parsed_str = try utils.parseString(raw_val, &lines, &multiline_buf, allocator);
-            const final_val = if (std.mem.indexOfScalar(u8, parsed_str, '$') != null)
-                try utils.resolveVariables(parsed_str, &config, allocator, null, full_key, null)
-            else
-                parsed_str;
+            // Fallback: try parsing as string
+            const parsed = try utils.parseString(raw_val, &lines, &multiline_buf, allocator);
+            defer allocator.free(parsed);
 
-            try config.map.put(full_key, final_val);
+            var resolved: []const u8 = parsed;
+            const needs_resolve = std.mem.indexOfScalar(u8, parsed, '$') != null;
+            var resolved_owned = false;
 
-            if (!std.mem.eql(u8, final_val, parsed_str)) allocator.free(parsed_str);
+            if (needs_resolve) {
+                resolved = try utils.resolveVariables(parsed, &config, allocator, null, full_key, null);
+                resolved_owned = true;
+            }
+            defer if (resolved_owned) allocator.free(resolved);
+
+            const val_copy = try allocator.dupe(u8, resolved);
+            errdefer allocator.free(val_copy);
+
+            if (config.map.getEntry(full_key)) |entry_ptr| {
+                allocator.free(entry_ptr.key_ptr.*);
+                allocator.free(entry_ptr.value_ptr.*);
+                _ = config.map.remove(full_key);
+            }
+            try config.map.put(full_key, val_copy);
         }
 
         if (current_prefix.len > 0) allocator.free(current_prefix);
@@ -789,7 +865,7 @@ pub const Config = struct {
     }
 
     /// Loads a config from an in-memory buffer.
-    /// Accepts format `.env` or `.ini`.
+    /// Accepts format `.env`, `.ini` or `.toml`.
     pub fn loadFromBuffer(text: []const u8, format: Format, allocator: std.mem.Allocator) !Config {
         return switch (format) {
             .env => Config.parseEnv(text, allocator),
