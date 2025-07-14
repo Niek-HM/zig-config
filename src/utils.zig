@@ -1,5 +1,5 @@
 const std = @import("std");
-const Config = @import("config.zig").Config;
+const Config = @import("config.zig");
 const ConfigError = Config.ConfigError;
 
 const ResolvedValue = struct {
@@ -20,17 +20,6 @@ pub const VariableExpr = struct {
         plus,
     };
 };
-
-const Value = union(enum) {
-    string: []const u8,
-    int: i64,
-    float: f64,
-    bool: bool,
-    list: []Value,
-    table: Table,
-};
-
-const Table: type = std.StringHashMap(Value);
 
 /// Parses a variable expression inside `${...}` and splits it into:
 /// - The variable name
@@ -143,7 +132,9 @@ pub fn parseString(
     }
 
     // Fallback for unquoted values
-    return try allocator.dupe(u8, raw_val);
+    const dupe_raw = try allocator.dupe(u8, raw_val);
+    errdefer allocator.free(dupe_raw);
+    return dupe_raw;
 }
 
 /// Parses a TOML array value and inserts any nested tables/arrays into the config.
@@ -153,90 +144,87 @@ pub fn parseString(
 ///
 /// Returns the full array value as a string, trimmed and owned by caller.
 pub fn parseList(
-    config: *Config,
-    raw_val: []const u8,
+    raw: []const u8,
     lines: *std.mem.SplitIterator(u8, .sequence),
     multiline_buf: *std.ArrayList(u8),
-    full_key: []const u8,
     allocator: std.mem.Allocator,
-) ![]const u8 {
-    var full_array: []const u8 = raw_val;
-    var owns_full_array: bool = false;
+) ![]Config.Value {
+    const list_inner = std.mem.trim(u8, raw[1 .. raw.len - 1], " \t\r\n");
 
-    // Handle multiline arrays
-    if (raw_val.len == 0 or raw_val[raw_val.len - 1] != ']') {
-        multiline_buf.clearRetainingCapacity();
-        try multiline_buf.appendSlice(raw_val);
-        try multiline_buf.append('\n');
+    var items = std.ArrayList(Config.Value).init(allocator);
+    errdefer {
+        for (items.items) |*item| item.deinit(allocator);
+        items.deinit();
+    }
 
-        var depth: usize = 1;
-        while (lines.next()) |line| {
-            const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
-            if (trimmed.len == 0) continue;
-            for (trimmed) |c| switch (c) {
-                '[', '{' => depth += 1,
-                ']', '}' => if (depth > 0) {
-                    depth -= 1;
-                },
-                else => {},
-            };
-            try multiline_buf.appendSlice(trimmed);
-            try multiline_buf.append('\n');
-            if (depth == 0) break;
+    var start: usize = 0;
+    var depth: usize = 0;
+    var in_quote: ?u8 = null;
+    var i: usize = 0;
+
+    while (i < list_inner.len) {
+        const c = list_inner[i];
+        if (in_quote) |q| {
+            if (c == q) in_quote = null else if (c == '\\' and i + 1 < list_inner.len) i += 1;
+        } else switch (c) {
+            '"', '\'' => in_quote = c,
+            '[' => depth += 1,
+            ']' => if (depth > 0) {
+                depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                const slice = std.mem.trim(u8, list_inner[start..i], " \t\r\n");
+                if (slice.len > 0) try items.append(try parseValue(slice, lines, multiline_buf, allocator));
+                start = i + 1;
+            },
+            else => {},
         }
-
-        full_array = try multiline_buf.toOwnedSlice();
-        owns_full_array = true;
+        i += 1;
     }
 
-    defer if (owns_full_array) allocator.free(full_array);
-
-    var trimmed: []const u8 = std.mem.trim(u8, full_array, " \t\r\n");
-    trimmed = try std.mem.replaceOwned(u8, allocator, trimmed, " ", "");
-    defer allocator.free(trimmed);
-
-    var content: []const u8 = trimmed;
-    var owns_content: bool = false;
-
-    if (std.mem.endsWith(u8, content, ",]")) {
-        const cleaned: []u8 = try std.fmt.allocPrint(allocator, "{s}]", .{content[0 .. content.len - 2]});
-        content = cleaned;
-        owns_content = true;
+    if (start < list_inner.len) {
+        const slice = std.mem.trim(u8, list_inner[start..], " \t\r\n");
+        if (slice.len > 0) try items.append(try parseValue(slice, lines, multiline_buf, allocator));
     }
 
-    defer if (owns_content) allocator.free(content);
+    return try items.toOwnedSlice();
+}
 
-    const result: []u8 = try allocator.dupe(u8, content);
-    errdefer allocator.free(result);
-
-    // Loop over array items
-    var items = std.mem.tokenizeScalar(u8, result[1 .. result.len - 1], ',');
-    while (items.next()) |entry| {
-        const val: []const u8 = std.mem.trim(u8, entry, " \t\r\n");
-        if (val.len == 0) continue;
-
-        if ((val[0] == '{' and val[val.len - 1] == '}') or (val[0] == '[' and val[val.len - 1] == ']')) {
-            const sub: Config = try Config.parseToml(val, allocator);
-            var it = sub.map.iterator();
-            while (it.next()) |sub_entry| {
-                const nested: []u8 = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ full_key, sub_entry.key_ptr.* });
-
-                const key_copy: []u8 = try allocator.dupe(u8, nested);
-                errdefer allocator.free(key_copy);
-                const val_copy: []u8 = try allocator.dupe(u8, sub_entry.value_ptr.*);
-                errdefer allocator.free(val_copy);
-
-                if (config.map.getEntry(key_copy)) |entry_ptr| {
-                    allocator.free(entry_ptr.key_ptr.*);
-                    allocator.free(entry_ptr.value_ptr.*);
-                    _ = config.map.remove(key_copy);
-                }
-                try config.map.put(key_copy, val_copy);
-            }
-        }
+fn parseValue(
+    val: []const u8,
+    lines: *std.mem.SplitIterator(u8, .sequence),
+    multiline_buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) ConfigError!Config.Value {
+    if (val.len >= 2 and val[0] == '{' and val[val.len - 1] == '}') {
+        const table = try parseTable(val, lines, multiline_buf, allocator);
+        const boxed = try allocator.create(Config.Table);
+        boxed.* = table;
+        return .{ .table = boxed };
+    } else if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']') {
+        return .{ .list = try parseList(val, lines, multiline_buf, allocator) };
     }
 
-    return result;
+    // Try int
+    if (std.fmt.parseInt(i64, val, 10)) |i| {
+        return .{ .int = i };
+    } else |_| {}
+
+    // Try float
+    if (std.fmt.parseFloat(f64, val)) |f| {
+        return .{ .float = f };
+    } else |_| {}
+
+    // Try bool
+    if (getBool(val)) |b| {
+        return .{ .bool = b };
+    }
+
+    // Fallback: string
+    const stripped_val = try allocator.dupe(u8, stripQuotes(val));
+    errdefer allocator.free(stripped_val);
+
+    return .{ .string = stripped_val };
 }
 
 /// Parses a TOML inline table (e.g., `{ a = 1, b = 2 }`) and inserts nested keys into `config`.
@@ -245,13 +233,11 @@ pub fn parseList(
 ///
 /// Returns the entire raw table string, trimmed and heap-allocated.
 pub fn parseTable(
-    config: *Config,
     raw_val: []const u8,
     lines: *std.mem.SplitIterator(u8, .sequence),
     multiline_buf: *std.ArrayList(u8),
-    full_key: []const u8,
     allocator: std.mem.Allocator,
-) ![]const u8 {
+) ConfigError!Config.Table {
     var full_table: []const u8 = raw_val;
     var owns_full_table: bool = false;
 
@@ -265,7 +251,7 @@ pub fn parseTable(
             try multiline_buf.appendSlice(line);
             try multiline_buf.append('\n');
 
-            const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len == 0) continue;
 
             for (trimmed) |c| switch (c) {
@@ -276,8 +262,6 @@ pub fn parseTable(
                 else => {},
             };
 
-            //try multiline_buf.appendSlice(trimmed);
-            //try multiline_buf.append('\n');
             if (depth == 0) break;
         }
 
@@ -287,94 +271,64 @@ pub fn parseTable(
 
     defer if (owns_full_table) allocator.free(full_table);
 
-    const content: []const u8 = std.mem.trim(u8, full_table[1 .. full_table.len - 1], " \t\r\n");
+    const content = std.mem.trim(u8, full_table[1 .. full_table.len - 1], " \t\r\n");
+    var table = Config.Table.init(allocator);
+    errdefer table.deinit();
 
-    var pairs = std.ArrayList([]const u8).init(allocator);
-    defer pairs.deinit();
-
-    // smart split respecting nesting
     var start: usize = 0;
     var depth: usize = 0;
     var in_quote: ?u8 = null;
     var i: usize = 0;
     while (i < content.len) {
-        const c: u8 = content[i];
-        if (in_quote) |quote| {
-            if (c == quote) {
+        const c = content[i];
+        if (in_quote) |q| {
+            if (c == q) {
                 in_quote = null;
             } else if (c == '\\' and i + 1 < content.len) {
                 i += 1;
             }
-        } else {
-            switch (c) {
-                '"', '\'' => in_quote = c,
-                '{', '[' => depth += 1,
-                '}', ']' => if (depth > 0) {
-                    depth -= 1;
-                },
-                ',' => if (depth == 0) {
-                    try pairs.append(std.mem.trim(u8, content[start..i], " \t\r\n"));
-                    start = i + 1;
-                },
-                else => {},
-            }
+        } else switch (c) {
+            '"', '\'' => in_quote = c,
+            '{', '[' => depth += 1,
+            '}', ']' => if (depth > 0) {
+                depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                const slice = std.mem.trim(u8, content[start..i], " \t\r\n");
+                if (slice.len > 0) try parseKeyValueIntoTable(slice, &table, lines, multiline_buf, allocator);
+                start = i + 1;
+            },
+            else => {},
         }
         i += 1;
     }
 
     if (start < content.len) {
-        const last: []const u8 = std.mem.trim(u8, content[start..], " \t\r\n");
-        if (last.len > 0) try pairs.append(last);
+        const slice = std.mem.trim(u8, content[start..], " \t\r\n");
+        if (slice.len > 0) try parseKeyValueIntoTable(slice, &table, lines, multiline_buf, allocator);
     }
 
-    var nested_key: ?[]u8 = null;
-    defer if (nested_key) |k| allocator.free(k);
+    return table;
+}
 
-    for (pairs.items) |pair| {
-        if (nested_key) |k| allocator.free(k);
-        nested_key = null;
+fn parseKeyValueIntoTable(
+    pair: []const u8,
+    table: *Config.Table,
+    lines: *std.mem.SplitIterator(u8, .sequence),
+    multiline_buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) !void {
+    const eq_idx = std.mem.indexOfScalar(u8, pair, '=') orelse return ConfigError.ParseInvalidLine;
+    const key = std.mem.trim(u8, pair[0..eq_idx], " \t\r\n");
+    const val = std.mem.trim(u8, pair[eq_idx + 1 ..], " \t\r\n");
 
-        const trimmed_pair: []const u8 = std.mem.trim(u8, pair, " \t\r\n");
-        if (trimmed_pair.len == 0 or !std.mem.containsAtLeast(u8, trimmed_pair, 1, "=")) continue;
+    var value = try parseValue(val, lines, multiline_buf, allocator);
+    errdefer value.deinit(allocator);
 
-        const sep: usize = std.mem.indexOfScalar(u8, pair, '=') orelse return ConfigError.ParseInvalidLine;
-        const key: []const u8 = std.mem.trim(u8, pair[0..sep], " \t\r\n");
-        const val: []const u8 = std.mem.trim(u8, pair[sep + 1 ..], " \t\r\n");
+    const key_copy = try allocator.dupe(u8, stripQuotes(key));
+    errdefer allocator.free(key_copy);
 
-        nested_key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ full_key, key });
-
-        if (val.len >= 2 and val[0] == '{' and val[val.len - 1] == '}') {
-            const parsed: []const u8 = try parseTable(config, val, lines, multiline_buf, nested_key.?, allocator);
-            allocator.free(parsed);
-            allocator.free(nested_key.?);
-            nested_key = null;
-            continue;
-        } else if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']') {
-            const parsed: []const u8 = try parseList(config, val, lines, multiline_buf, nested_key.?, allocator);
-            allocator.free(parsed);
-            allocator.free(nested_key.?);
-            nested_key = null;
-            continue;
-        } else {
-            const stripped_val: []const u8 = stripQuotes(val);
-            const new_val: []u8 = try allocator.dupe(u8, stripped_val);
-            errdefer allocator.free(new_val);
-
-            const key_copy: []u8 = try allocator.dupe(u8, nested_key.?);
-            errdefer allocator.free(key_copy);
-
-            if (config.map.getEntry(key_copy)) |entry_ptr| {
-                allocator.free(entry_ptr.key_ptr.*);
-                allocator.free(entry_ptr.value_ptr.*);
-                _ = config.map.remove(key_copy);
-            }
-            try config.map.put(key_copy, new_val);
-
-            allocator.free(nested_key.?);
-            nested_key = null;
-        }
-    }
-    return try allocator.dupe(u8, std.mem.trim(u8, full_table, " \t\r\n"));
+    try table.put(key_copy, value);
 }
 
 /// Resolves variable placeholders in a string (e.g. `${VAR}`), including fallbacks.
@@ -392,11 +346,11 @@ pub fn parseTable(
 /// 2. From the config map itself (post-resolution phase)
 pub fn resolveVariables(
     value: []const u8,
-    cfg: *Config,
+    cfg: *Config.Config,
     allocator: std.mem.Allocator,
     visited_opt: ?*std.StringHashMap(void),
     current_key: ?[]const u8,
-    source_raw_values: ?*const std.StringHashMap([]const u8),
+    source_raw_values: ?*const std.StringHashMap(Config.Value),
 ) ![]const u8 {
     var owned_visited_storage: ?std.StringHashMap(void) = null;
     const visited: *std.StringHashMap(void) = visited_opt orelse blk: {
@@ -406,7 +360,7 @@ pub fn resolveVariables(
     defer if (owned_visited_storage) |*map| map.deinit();
 
     var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
+    defer result.deinit();
 
     var i: usize = 0;
     while (i < value.len) {
@@ -425,24 +379,33 @@ pub fn resolveVariables(
             const inside: []const u8 = value[i + 2 .. j - 1];
 
             const parsed = try parseVariableExpression(inside);
+            const parsed_name = parsed.var_name;
 
-            if (visited.contains(parsed.var_name)) return ConfigError.CircularReference;
+            if (visited.contains(parsed_name)) return ConfigError.CircularReference;
             if (current_key) |ck| {
-                if (std.mem.eql(u8, parsed.var_name, ck)) return ConfigError.CircularReference;
+                if (std.mem.eql(u8, parsed_name, ck)) return ConfigError.CircularReference;
             }
 
-            try visited.put(parsed.var_name, {});
-            defer _ = visited.remove(parsed.var_name);
+            try visited.put(parsed_name, {});
+            defer _ = visited.remove(parsed_name);
 
             // Lookup value
             const val_opt: ?ResolvedValue = blk: {
                 if (source_raw_values) |raw| {
-                    if (raw.get(parsed.var_name)) |val| {
-                        break :blk ResolvedValue{ .value = val, .owned = false };
+                    if (raw.get(parsed_name)) |val| {
+                        if (val == .string) {
+                            break :blk ResolvedValue{ .value = val.string, .owned = false };
+                        } else {
+                            return ConfigError.InvalidType;
+                        }
                     }
                 }
                 if (cfg.get(parsed.var_name)) |val| {
-                    break :blk ResolvedValue{ .value = val, .owned = false };
+                    if (val == .string) {
+                        break :blk ResolvedValue{ .value = val.string, .owned = false };
+                    } else {
+                        return ConfigError.InvalidType;
+                    }
                 }
                 const env_val = std.process.getEnvVarOwned(allocator, parsed.var_name) catch null;
                 if (env_val) |e| {
@@ -563,42 +526,43 @@ pub fn resolveVariables(
         }
     }
 
-    return result.toOwnedSlice();
+    const out = try result.toOwnedSlice();
+    return out;
 }
 
 /// Internal helper for merging a single key/value with conflict handling.
 pub fn insertEntry(
-    cfg: *Config,
+    cfg: *Config.Config,
     key: []const u8,
     value: []const u8,
-    behavior: Config.MergeBehavior,
+    behavior: Config.Config.MergeBehavior,
     allocator: std.mem.Allocator,
 ) !void {
     const k: []u8 = try allocator.dupe(u8, key);
-    const v: []u8 = try allocator.dupe(u8, value);
+    errdefer allocator.free(k);
 
     const gop = try cfg.map.getOrPut(k);
     if (gop.found_existing) {
         switch (behavior) {
             .overwrite => {
-                cfg.map.allocator.free(gop.key_ptr.*);
-                cfg.map.allocator.free(gop.value_ptr.*);
+                gop.key_ptr.*.deinit(allocator);
+                gop.value_ptr.*.deinit(allocator);
                 gop.key_ptr.* = k;
-                gop.value_ptr.* = v;
+                gop.value_ptr.* = .{ .string = value };
             },
             .skip_existing => {
                 allocator.free(k);
-                allocator.free(v);
+                value.deinit(allocator);
             },
             .error_on_conflict => {
                 allocator.free(k);
-                allocator.free(v);
+                value.deinit(allocator);
                 return ConfigError.KeyConflict;
             },
         }
     } else {
         gop.key_ptr.* = k;
-        gop.value_ptr.* = v;
+        gop.value_ptr.* = .{ .string = value };
     }
 }
 
@@ -656,7 +620,7 @@ pub fn unescapeString(s: []const u8, allocator: std.mem.Allocator) ![]const u8 {
 
 pub fn escapeString(s: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     var out = std.ArrayList(u8).init(allocator);
-    //defer out.deinit();
+    defer out.deinit();
 
     var it = std.unicode.Utf8Iterator{
         .bytes = s,
@@ -738,4 +702,38 @@ pub fn getBool(s: []const u8) ?bool {
             return false;
     }
     return null;
+}
+
+pub fn writeTomlValue(val: Config.Value, writer: anytype, allocator: std.mem.Allocator) !void {
+    switch (val) {
+        .string => |s| {
+            const escaped = try escapeString(s, allocator);
+            defer allocator.free(escaped);
+            try writer.print("\"{s}\"", .{escaped});
+        },
+        .int => |i| try writer.print("{d}", .{i}),
+        .float => |f| try writer.print("{d}", .{f}),
+        .bool => |b| try writer.print("{}", .{b}),
+        .list => |list| {
+            try writer.writeAll("[");
+            for (list, 0..) |elem, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeTomlValue(elem, writer, allocator);
+            }
+            try writer.writeAll("]");
+        },
+        .table => |t| {
+            try writer.writeAll("{ ");
+            var it = t.iterator();
+            var i: usize = 0;
+            while (it.next()) |entry| {
+                if (i > 0) try writer.writeAll(", ");
+                const key = entry.key_ptr.*;
+                try writer.print("{s} = ", .{key});
+                try writeTomlValue(entry.value_ptr.*, writer, allocator);
+                i += 1;
+            }
+            try writer.writeAll(" }");
+        },
+    }
 }
