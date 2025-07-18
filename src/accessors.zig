@@ -139,7 +139,7 @@ pub fn has(self: *Config, key: []const u8) bool {
 
 /// Returns a list of all top-level keys in the config.
 ///
-/// Caller is responsible for freeing the returned array.
+/// NOTE: Don't free the returned key's
 /// This does not include nested keys in `.table` values unless flattened manually.
 pub fn keys(self: *Config, allocator: std.mem.Allocator) ![][]const u8 {
     var key: [][]const u8 = try allocator.alloc([]const u8, self.map.count());
