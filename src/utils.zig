@@ -1,11 +1,12 @@
 const std = @import("std");
-const Config = @import("config.zig");
-const ConfigError = Config.ConfigError;
 
-const ResolvedValue = struct {
-    value: []const u8,
-    owned: bool,
-};
+const parsed = @import("parser/mod.zig");
+const parseValue = parsed.shared.parseValue;
+
+const Value = @import("value.zig").Value;
+const Table = @import("value.zig").Table;
+const Config = @import("config.zig").Config;
+const ConfigError = @import("errors.zig").ConfigError;
 
 pub const VariableExpr = struct {
     var_name: []const u8,
@@ -55,265 +56,11 @@ pub fn parseVariableExpression(expr: []const u8) !VariableExpr {
     };
 }
 
-/// Parses a TOML or INI-style string, handling quoted and multiline formats.
-///
-/// Supports:
-/// - Basic strings (`"..."`) with escape sequences
-/// - Literal strings (`'...'`) without escaping
-/// - Multiline strings (`'''...'''` or `"""..."""`)
-///
-/// Returns the parsed content, optionally unescaped, allocated on the heap.
-pub fn parseString(
-    raw_val: []const u8,
-    lines: *std.mem.SplitIterator(u8, .sequence),
-    multiline_buf: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-) ![]const u8 {
-    if (raw_val.len == 0) return "";
-
-    const is_basic: bool = raw_val[0] == '"';
-    const is_literal: bool = raw_val[0] == '\'';
-    const is_multiline: bool = raw_val.len >= 3 and
-        (std.mem.startsWith(u8, raw_val, "\"\"\"") or
-            std.mem.startsWith(u8, raw_val, "'''"));
-
-    // Handle multiline case
-    if (is_multiline) {
-        const quote_type: *const [3:0]u8 = if (is_basic) "\"\"\"" else "'''";
-        multiline_buf.clearRetainingCapacity();
-
-        // Same-line triple quoted value
-        if (std.mem.endsWith(u8, raw_val, quote_type)) {
-            const inner: []const u8 = raw_val[3 .. raw_val.len - 3];
-            return if (is_basic)
-                try unescapeString(inner, allocator)
-            else
-                try allocator.dupe(u8, inner);
-        }
-
-        // Start collecting multiline content
-        if (raw_val.len > 3) {
-            try multiline_buf.appendSlice(raw_val[3..]);
-            try multiline_buf.append('\n');
-        }
-
-        while (lines.next()) |line| {
-            const trimmed: []const u8 = std.mem.trim(u8, line, " \t\r\n");
-            if (findUnescaped(trimmed, quote_type)) |end_pos| {
-                try multiline_buf.appendSlice(trimmed[0..end_pos]);
-                break;
-            } else {
-                try multiline_buf.appendSlice(trimmed);
-                try multiline_buf.append('\n');
-            }
-        }
-
-        const joined = try multiline_buf.toOwnedSlice();
-
-        if (is_basic) {
-            const result: []const u8 = try unescapeString(joined, allocator);
-            allocator.free(joined);
-            return result;
-        } else {
-            return joined;
-        }
-    }
-
-    // Handle single-line quoted strings
-    if (raw_val.len >= 2 and
-        ((is_basic and raw_val[raw_val.len - 1] == '"') or
-            (is_literal and raw_val[raw_val.len - 1] == '\'')))
-    {
-        const inner: []const u8 = raw_val[1 .. raw_val.len - 1];
-        return if (is_basic)
-            try unescapeString(inner, allocator)
-        else
-            try allocator.dupe(u8, inner);
-    }
-
-    // Fallback for unquoted values
-    const dupe_raw = try allocator.dupe(u8, raw_val);
-    errdefer allocator.free(dupe_raw);
-    return dupe_raw;
-}
-
-/// Parses a TOML array value and inserts any nested tables/arrays into the config.
-///
-/// Handles multiline arrays, and if items are tables (`{}`) or arrays (`[]`),
-/// recursively flattens their contents into `config` under dot-prefixed keys.
-///
-/// Returns the full array value as a string, trimmed and owned by caller.
-pub fn parseList(
-    raw: []const u8,
-    lines: *std.mem.SplitIterator(u8, .sequence),
-    multiline_buf: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-) ![]Config.Value {
-    const list_inner = std.mem.trim(u8, raw[1 .. raw.len - 1], " \t\r\n");
-
-    var items = std.ArrayList(Config.Value).init(allocator);
-    errdefer {
-        for (items.items) |*item| item.deinit(allocator);
-        items.deinit();
-    }
-
-    var start: usize = 0;
-    var depth: usize = 0;
-    var in_quote: ?u8 = null;
-    var i: usize = 0;
-
-    while (i < list_inner.len) {
-        const c = list_inner[i];
-        if (in_quote) |q| {
-            if (c == q) in_quote = null else if (c == '\\' and i + 1 < list_inner.len) i += 1;
-        } else switch (c) {
-            '"', '\'' => in_quote = c,
-            '[' => depth += 1,
-            ']' => if (depth > 0) {
-                depth -= 1;
-            },
-            ',' => if (depth == 0) {
-                const slice = std.mem.trim(u8, list_inner[start..i], " \t\r\n");
-                if (slice.len > 0) try items.append(try parseValue(slice, lines, multiline_buf, allocator));
-                start = i + 1;
-            },
-            else => {},
-        }
-        i += 1;
-    }
-
-    if (start < list_inner.len) {
-        const slice = std.mem.trim(u8, list_inner[start..], " \t\r\n");
-        if (slice.len > 0) try items.append(try parseValue(slice, lines, multiline_buf, allocator));
-    }
-
-    return try items.toOwnedSlice();
-}
-
-fn parseValue(
-    val: []const u8,
-    lines: *std.mem.SplitIterator(u8, .sequence),
-    multiline_buf: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-) ConfigError!Config.Value {
-    if (val.len >= 2 and val[0] == '{' and val[val.len - 1] == '}') {
-        const table = try parseTable(val, lines, multiline_buf, allocator);
-        const boxed = try allocator.create(Config.Table);
-        boxed.* = table;
-        return .{ .table = boxed };
-    } else if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']') {
-        return .{ .list = try parseList(val, lines, multiline_buf, allocator) };
-    }
-
-    // Try int
-    if (std.fmt.parseInt(i64, val, 10)) |i| {
-        return .{ .int = i };
-    } else |_| {}
-
-    // Try float
-    if (std.fmt.parseFloat(f64, val)) |f| {
-        return .{ .float = f };
-    } else |_| {}
-
-    // Try bool
-    if (getBool(val)) |b| {
-        return .{ .bool = b };
-    }
-
-    // Fallback: string
-    const stripped_val = try allocator.dupe(u8, stripQuotes(val));
-    errdefer allocator.free(stripped_val);
-
-    return .{ .string = stripped_val };
-}
-
-/// Parses a TOML inline table (e.g., `{ a = 1, b = 2 }`) and inserts nested keys into `config`.
-///
-/// If nested tables or arrays are present, they are recursively parsed and flattened.
-///
-/// Returns the entire raw table string, trimmed and heap-allocated.
-pub fn parseTable(
-    raw_val: []const u8,
-    lines: *std.mem.SplitIterator(u8, .sequence),
-    multiline_buf: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-) ConfigError!Config.Table {
-    var full_table: []const u8 = raw_val;
-    var owns_full_table: bool = false;
-
-    if (raw_val.len == 0 or raw_val[raw_val.len - 1] != '}') {
-        multiline_buf.clearRetainingCapacity();
-        try multiline_buf.appendSlice(raw_val);
-        try multiline_buf.append('\n');
-
-        var depth: usize = 1;
-        while (lines.next()) |line| {
-            try multiline_buf.appendSlice(line);
-            try multiline_buf.append('\n');
-
-            const trimmed = std.mem.trim(u8, line, " \t\r\n");
-            if (trimmed.len == 0) continue;
-
-            for (trimmed) |c| switch (c) {
-                '{', '[' => depth += 1,
-                '}', ']' => if (depth > 0) {
-                    depth -= 1;
-                },
-                else => {},
-            };
-
-            if (depth == 0) break;
-        }
-
-        full_table = try multiline_buf.toOwnedSlice();
-        owns_full_table = true;
-    }
-
-    defer if (owns_full_table) allocator.free(full_table);
-
-    const content = std.mem.trim(u8, full_table[1 .. full_table.len - 1], " \t\r\n");
-    var table = Config.Table.init(allocator);
-    errdefer table.deinit();
-
-    var start: usize = 0;
-    var depth: usize = 0;
-    var in_quote: ?u8 = null;
-    var i: usize = 0;
-    while (i < content.len) {
-        const c = content[i];
-        if (in_quote) |q| {
-            if (c == q) {
-                in_quote = null;
-            } else if (c == '\\' and i + 1 < content.len) {
-                i += 1;
-            }
-        } else switch (c) {
-            '"', '\'' => in_quote = c,
-            '{', '[' => depth += 1,
-            '}', ']' => if (depth > 0) {
-                depth -= 1;
-            },
-            ',' => if (depth == 0) {
-                const slice = std.mem.trim(u8, content[start..i], " \t\r\n");
-                if (slice.len > 0) try parseKeyValueIntoTable(slice, &table, lines, multiline_buf, allocator);
-                start = i + 1;
-            },
-            else => {},
-        }
-        i += 1;
-    }
-
-    if (start < content.len) {
-        const slice = std.mem.trim(u8, content[start..], " \t\r\n");
-        if (slice.len > 0) try parseKeyValueIntoTable(slice, &table, lines, multiline_buf, allocator);
-    }
-
-    return table;
-}
-
-fn parseKeyValueIntoTable(
+/// Parses a `key=value` pair string into a table entry.
+/// Handles unquoting keys and parsing value (including multiline).
+pub fn parseKeyValueIntoTable(
     pair: []const u8,
-    table: *Config.Table,
+    table: *Table,
     lines: *std.mem.SplitIterator(u8, .sequence),
     multiline_buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -329,205 +76,6 @@ fn parseKeyValueIntoTable(
     errdefer allocator.free(key_copy);
 
     try table.put(key_copy, value);
-}
-
-/// Resolves variable placeholders in a string (e.g. `${VAR}`), including fallbacks.
-///
-/// Recursively resolves nested variables and applies these substitution rules:
-/// - `${VAR}` → replaced with VAR's value, or error if not found
-/// - `${VAR:-default}` → use `default` if VAR is missing or empty
-/// - `${VAR-default}` → use `default` if VAR is missing
-/// - `${VAR:+alt}` → use `alt` if VAR is set and non-empty
-/// - `${VAR+alt}` → use `alt` if VAR is set (even if empty)
-///
-/// Tracks visited variable names to detect and prevent circular references.
-/// Raw values are resolved in two phases:
-/// 1. From `source_raw_values` if provided (pre-resolution phase)
-/// 2. From the config map itself (post-resolution phase)
-pub fn resolveVariables(
-    value: []const u8,
-    cfg: *Config.Config,
-    allocator: std.mem.Allocator,
-    visited_opt: ?*std.StringHashMap(void),
-    current_key: ?[]const u8,
-    source_raw_values: ?*const std.StringHashMap(Config.Value),
-) ![]const u8 {
-    var owned_visited_storage: ?std.StringHashMap(void) = null;
-    const visited: *std.StringHashMap(void) = visited_opt orelse blk: {
-        owned_visited_storage = std.StringHashMap(void).init(allocator);
-        break :blk &owned_visited_storage.?;
-    };
-    defer if (owned_visited_storage) |*map| map.deinit();
-
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-
-    var i: usize = 0;
-    while (i < value.len) {
-        if (value[i] == '\\' and i + 1 < value.len and value[i + 1] == '$') {
-            try result.append('$');
-            i += 2;
-        } else if (value[i] == '$' and i + 1 < value.len and value[i + 1] == '{') {
-            // Parse placeholder
-            var brace_depth: usize = 1;
-            var j = i + 2;
-            while (j < value.len and brace_depth > 0) {
-                if (value[j] == '{') brace_depth += 1 else if (value[j] == '}') brace_depth -= 1;
-                j += 1;
-            }
-            if (brace_depth != 0) return ConfigError.InvalidPlaceholder;
-            const inside: []const u8 = value[i + 2 .. j - 1];
-
-            const parsed = try parseVariableExpression(inside);
-            const parsed_name = parsed.var_name;
-
-            if (visited.contains(parsed_name)) return ConfigError.CircularReference;
-            if (current_key) |ck| {
-                if (std.mem.eql(u8, parsed_name, ck)) return ConfigError.CircularReference;
-            }
-
-            try visited.put(parsed_name, {});
-            defer _ = visited.remove(parsed_name);
-
-            // Lookup value
-            const val_opt: ?ResolvedValue = blk: {
-                if (source_raw_values) |raw| {
-                    if (raw.get(parsed_name)) |val| {
-                        if (val == .string) {
-                            break :blk ResolvedValue{ .value = val.string, .owned = false };
-                        } else {
-                            return ConfigError.InvalidType;
-                        }
-                    }
-                }
-                if (cfg.get(parsed.var_name)) |val| {
-                    if (val == .string) {
-                        break :blk ResolvedValue{ .value = val.string, .owned = false };
-                    } else {
-                        return ConfigError.InvalidType;
-                    }
-                }
-                const env_val = std.process.getEnvVarOwned(allocator, parsed.var_name) catch null;
-                if (env_val) |e| {
-                    const copy: []u8 = try allocator.dupe(u8, e);
-                    allocator.free(e);
-                    break :blk ResolvedValue{ .value = copy, .owned = true };
-                }
-                break :blk null;
-            };
-
-            // Evaluate substitution
-            switch (parsed.operator) {
-                .none => {
-                    if (val_opt) |val_data| {
-                        const val: []const u8 = val_data.value;
-                        const rec: []const u8 = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
-                        errdefer allocator.free(rec);
-                        try result.appendSlice(rec);
-                        allocator.free(rec);
-                        if (val_data.owned) allocator.free(val);
-                        i = j;
-                        continue;
-                    }
-                    if (parsed.fallback) |fb| {
-                        const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
-                        errdefer allocator.free(fb_val);
-                        try result.appendSlice(fb_val);
-                        allocator.free(fb_val);
-                        i = j;
-                        continue;
-                    }
-                    return ConfigError.UnknownVariable;
-                },
-                .colon_dash => {
-                    if (val_opt) |val_data| {
-                        const val: []const u8 = val_data.value;
-                        if (val.len > 0) {
-                            const rec: []const u8 = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
-                            errdefer allocator.free(rec);
-                            try result.appendSlice(rec);
-                            allocator.free(rec);
-                            if (val_data.owned) allocator.free(val);
-                            i = j;
-                            continue;
-                        }
-                        if (val_data.owned) allocator.free(val);
-                    }
-                    if (parsed.fallback) |fb| {
-                        const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
-                        errdefer allocator.free(fb_val);
-                        try result.appendSlice(fb_val);
-                        allocator.free(fb_val);
-                        i = j;
-                        continue;
-                    }
-                    return ConfigError.UnknownVariable;
-                },
-                .dash => {
-                    if (val_opt) |val_data| {
-                        const val: []const u8 = val_data.value;
-                        const rec: []const u8 = try resolveVariables(val, cfg, allocator, visited, parsed.var_name, source_raw_values);
-                        errdefer allocator.free(rec);
-                        try result.appendSlice(rec);
-                        allocator.free(rec);
-                        if (val_data.owned) allocator.free(val);
-                        i = j;
-                        continue;
-                    }
-                    if (parsed.fallback) |fb| {
-                        const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
-                        errdefer allocator.free(fb_val);
-                        try result.appendSlice(fb_val);
-                        allocator.free(fb_val);
-                        i = j;
-                        continue;
-                    }
-                    return ConfigError.UnknownVariable;
-                },
-                .colon_plus => {
-                    if (val_opt) |val_data| {
-                        const val: []const u8 = val_data.value;
-                        if (val.len > 0) {
-                            if (parsed.fallback) |fb| {
-                                const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
-                                errdefer allocator.free(fb_val);
-                                try result.appendSlice(fb_val);
-                                allocator.free(fb_val);
-                                if (val_data.owned) allocator.free(val);
-                                i = j;
-                                continue;
-                            }
-                        }
-                        if (val_data.owned) allocator.free(val);
-                    }
-                    i = j;
-                    continue;
-                },
-                .plus => {
-                    if (val_opt) |val_data| {
-                        if (parsed.fallback) |fb| {
-                            const fb_val: []const u8 = try resolveVariables(fb, cfg, allocator, visited, current_key, source_raw_values);
-                            errdefer allocator.free(fb_val);
-                            try result.appendSlice(fb_val);
-                            allocator.free(fb_val);
-                            if (val_data.owned) allocator.free(val_data.value);
-                            i = j;
-                            continue;
-                        }
-                        if (val_data.owned) allocator.free(val_data.value);
-                    }
-                    i = j;
-                    continue;
-                },
-            }
-        } else {
-            try result.append(value[i]);
-            i += 1;
-        }
-    }
-
-    const out = try result.toOwnedSlice();
-    return out;
 }
 
 /// Internal helper for merging a single key/value with conflict handling.
@@ -638,6 +186,7 @@ pub fn escapeString(s: []const u8, allocator: std.mem.Allocator) ![]const u8 {
             '\x08' => try out.appendSlice("\\b"),
             '\x0C' => try out.appendSlice("\\f"),
             else => {
+                // Handle printable characters and encode them back to UTF-8 if not escaped
                 if (cp < 0x20 or cp == 0x7F) {
                     try out.appendSlice("\\u");
                     var buf: [8]u8 = undefined;
@@ -704,36 +253,71 @@ pub fn getBool(s: []const u8) ?bool {
     return null;
 }
 
-pub fn writeTomlValue(val: Config.Value, writer: anytype, allocator: std.mem.Allocator) !void {
-    switch (val) {
-        .string => |s| {
-            const escaped = try escapeString(s, allocator);
-            defer allocator.free(escaped);
-            try writer.print("\"{s}\"", .{escaped});
+/// Recursively deep clones a Value, including all nested lists and tables.
+/// Returns a fully owned duplicate.
+pub fn deepCloneValue(src: *const Value, allocator: std.mem.Allocator) ConfigError!Value {
+    return switch (src.*) {
+        .string => |s| blk: {
+            const copy = try allocator.dupe(u8, s);
+            errdefer allocator.free(copy);
+            break :blk .{ .string = copy };
         },
-        .int => |i| try writer.print("{d}", .{i}),
-        .float => |f| try writer.print("{d}", .{f}),
-        .bool => |b| try writer.print("{}", .{b}),
-        .list => |list| {
-            try writer.writeAll("[");
-            for (list, 0..) |elem, i| {
-                if (i > 0) try writer.writeAll(", ");
-                try writeTomlValue(elem, writer, allocator);
+        .list => |orig| blk: {
+            const new_list = try allocator.alloc(Value, orig.len);
+            for (orig, 0..) |*v, i| {
+                new_list[i] = try deepCloneValue(v, allocator);
             }
-            try writer.writeAll("]");
+            break :blk .{ .list = new_list };
         },
-        .table => |t| {
-            try writer.writeAll("{ ");
-            var it = t.iterator();
-            var i: usize = 0;
-            while (it.next()) |entry| {
-                if (i > 0) try writer.writeAll(", ");
-                const key = entry.key_ptr.*;
-                try writer.print("{s} = ", .{key});
-                try writeTomlValue(entry.value_ptr.*, writer, allocator);
-                i += 1;
+        .table => |orig| blk: {
+            const new_table = try allocator.create(Table);
+            new_table.* = Table.init(allocator);
+            var it = orig.iterator();
+            while (it.next()) |e| {
+                const k = try allocator.dupe(u8, e.key_ptr.*);
+                errdefer allocator.free(k);
+                const v_copy = try deepCloneValue(e.value_ptr, allocator);
+                try new_table.put(k, v_copy);
             }
-            try writer.writeAll(" }");
+            break :blk .{ .table = new_table };
         },
+        .int => |v| .{ .int = v },
+        .float => |v| .{ .float = v },
+        .bool => |v| .{ .bool = v },
+    };
+}
+
+/// Converts an in-place `Value` to an owned deep copy version.
+/// Used after parsing when the Value was borrowed from input buffer.
+/// TODO: Consider folding into `deepCloneValue`.
+fn deepCopyValue(val: *Value, allocator: std.mem.Allocator) anyerror!void {
+    switch (val.*) {
+        .string => {
+            const val_str = val.string;
+            const tmp_copy = try allocator.dupe(u8, val_str);
+            errdefer allocator.free(tmp_copy);
+            val.* = .{ .string = tmp_copy };
+        },
+        .list => {
+            const orig = val.list;
+            const new_list = try allocator.alloc(Value, orig.len);
+            for (orig, 0..) |*v, i| {
+                new_list[i] = try deepCloneValue(v, allocator);
+            }
+            val.* = .{ .list = new_list };
+        },
+        .table => {
+            const orig = val.table;
+            const new_table = try allocator.create(Table);
+            new_table.* = Table.init(allocator);
+            var it = orig.iterator();
+            while (it.next()) |e| {
+                const k = try allocator.dupe(u8, e.key_ptr.*);
+                const v_copy = try deepCloneValue(e.value_ptr, allocator);
+                try new_table.put(k, v_copy);
+            }
+            val.* = .{ .table = new_table };
+        },
+        else => {}, // int, float, bool – nothing to copy
     }
 }

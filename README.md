@@ -88,7 +88,7 @@ const features = try config.getAs([]bool, "ENABLED_FLAGS", allocator);
 Arrays supported: `[]i64`, `[]f64`, `[]bool`, `[][]const u8`
 
 ## Roadmap
-✅ Short-term goals (v0.2.x)
+✅ Short-term goals (v0.3.x)
 - [x] Full TOML support (multiline strings, arrays, inline tables, escaping, substitution)
 - [ ] `.json` config input support
 - [ ] `.env.example` validation (check for missing/extra keys)
@@ -97,7 +97,7 @@ Arrays supported: `[]i64`, `[]f64`, `[]bool`, `[][]const u8`
 - [ ] Preserve typed values across formats (e.g. `true` instead of `"true"`)
 - [ ] CLI tool: merge, diff, validate, and export config
 
-🔭 Long-term goals (v0.3+)
+🔭 Long-term goals (v0.4+)
 - [ ] Live config reloading (file watching API)
 - [ ] SQLite-backed config store (persistent, reloadable)
 - [ ] Secrets injection from .secrets.env or Vault-compatible store
