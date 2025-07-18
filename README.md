@@ -26,9 +26,13 @@ pub fn main() !void {
     defer cfg.deinit();
 
     const port = try cfg.getAs(i64, "PORT", allocator);
+    defer port.deinit();
+
     const debug = try cfg.getAs(bool, "DEBUG", allocator);
+    defer debug.deinit();
+
     const host = try cfg.getAs([]const u8, "HOST", allocator);
-    defer allocator.free(host);
+    defer host.deinit();
 
     std.debug.print("Running on {s}:{d} (debug = {})", .{ host, port, debug });
 }
@@ -49,7 +53,8 @@ Nested substitutions and circular reference detection are supported.
 ## Merging Configs
 
 ```zig
-try config.merge(&other, allocator, .overwrite);
+var merged = try config.merge(&other, allocator, .overwrite);
+defer merged.deinit();
 ```
 
 `MergeBehavior` options:
@@ -57,12 +62,6 @@ try config.merge(&other, allocator, .overwrite);
 - `.overwrite` → always use new value  
 - `.skip_existing` → keep existing  
 - `.error_on_conflict` → fail on duplicate keys
-
-You can also merge directly from the system environment:
-
-```zig
-try config.merge(null, allocator, .skip_existing);
-```
 
 ## Supported Formats
 
@@ -89,12 +88,11 @@ Arrays supported: `[]i64`, `[]f64`, `[]bool`, `[][]const u8`
 
 ## Roadmap
 ✅ Short-term goals (v0.3.x)
-- [x] Full TOML support (multiline strings, arrays, inline tables, escaping, substitution)
+- [x] Full TOML support (date-time)
 - [ ] `.json` config input support
 - [ ] `.env.example` validation (check for missing/extra keys)
 - [ ] Null-delimited `EnvMap` export for subprocesses
 - [ ] Improve write serialization (preserve formatting where possible)
-- [ ] Preserve typed values across formats (e.g. `true` instead of `"true"`)
 - [ ] CLI tool: merge, diff, validate, and export config
 
 🔭 Long-term goals (v0.4+)
